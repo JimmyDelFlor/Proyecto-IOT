@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Power, Lightbulb, Home, Car, Utensils, Bed, ShowerHead, DoorOpen, Shirt, Wifi, WifiOff, Brain, Clock, TrendingUp } from 'lucide-react';
 import io from 'socket.io-client';
-
+import './index.css';
 // ⚠️ CAMBIAR ESTA IP/URL POR LA DE TU SERVIDOR NODE.JS
 const SERVER_URL = 'http://localhost:5000';
 
@@ -170,8 +170,8 @@ export default function App() {
         <div style={styles.header}>
           <div style={isMobile ? styles.headerContentMobile : styles.headerContent}>
             <div>
-              <h1 style={isMobile ? styles.titleMobile : styles.title}>Control de Luces Inteligente</h1>
-              <p style={isMobile ? styles.subtitleMobile : styles.subtitle}>Sistema con IA y Automatización</p>
+              <h1 style={isMobile ? styles.titleMobile : styles.title}>Control de Casa Inteligente</h1>
+              <p style={isMobile ? styles.subtitleMobile : styles.subtitle}>Sistema IOT</p>
               
               <div style={styles.statsGrid}>
                 <div style={styles.statCard}>
@@ -250,6 +250,46 @@ export default function App() {
               );
             })}
           </div>
+       <div className="metrics-grid">
+  {/* Temperatura */}
+  <div className="metric-card temperature">
+    <div className="metric-header">
+      <span className="metric-icon">🌡️</span>
+      <div className="metric-badge temperature">SIM</div>
+    </div>
+    <h3 className="metric-title">Temperatura</h3>
+    <div className="progress-bar">
+      <div className="progress-fill temperature" style={{ width: "70%" }} />
+    </div>
+    <p className="metric-value temperature">25°C</p>
+  </div>
+
+  {/* Humedad */}
+  <div className="metric-card humidity">
+    <div className="metric-header">
+      <span className="metric-icon">💧</span>
+      <div className="metric-badge humidity">SIM</div>
+    </div>
+    <h3 className="metric-title">Humedad</h3>
+    <div className="progress-bar">
+      <div className="progress-fill humidity" style={{ width: "56%" }} />
+    </div>
+    <p className="metric-value humidity">56%</p>
+  </div>
+
+  {/* Energía */}
+  <div className="metric-card energy">
+    <div className="metric-header">
+      <span className="metric-icon">⚡</span>
+      <div className="metric-badge energy">SIM</div>
+    </div>
+    <h3 className="metric-title">Consumo</h3>
+    <div className="progress-bar">
+      <div className="progress-fill energy" style={{ width: "45%" }} />
+    </div>
+    <p className="metric-value energy">119W</p>
+  </div>
+</div>
 
           {/* Sidebar */}
           <div style={styles.sidebar}>
@@ -347,6 +387,7 @@ export default function App() {
               ))
             )}
           </div>
+   
         </div>
       </div>
     </div>
