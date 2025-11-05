@@ -8,12 +8,12 @@
 #include <WebSocketsClient.h>
 
 // --- CONFIGURACIÓN WIFI ---
-const char* ssid = "moto g50 Seb";       // ← CAMBIAR
-const char* password = "12345678"; // ← CAMBIAR
+const char* ssid = "";       // ← CAMBIAR
+const char* password = ""; // ← CAMBIAR
 
 
 // --- CONFIGURACIÓN SERVIDOR NODE.JS ---
-const char* SERVER_IP = "10.153.142.93";  // ← CAMBIAR: IP del servidor Node.js
+const char* SERVER_IP = "";  // ← CAMBIAR: IP del servidor Node.js
 const int SERVER_PORT = 5000;
 const int WS_PORT = 5000;
 
