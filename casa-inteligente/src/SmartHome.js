@@ -173,8 +173,8 @@ export default function App() {
         <div className="header">
           <div className="header-content">
             <div>
-              <h1>Smart Home Control</h1>
-              <p>Sistema Inteligente Domótico</p>
+              <h1>Control de casa Inteligente</h1>
+              <p>Casa IOT</p>
             </div>
             <div className="header-controls">
               <button onClick={toggleAutoMode} className={`btn-control ${autoMode ? 'active' : ''}`}>
