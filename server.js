@@ -21,7 +21,7 @@ app.use(express.static('public')); // Para servir archivos estáticos si es nece
 // ESTADO DEL SISTEMA
 // =====================================================
 let systemState = {
-  esp32Devices: {}, // Múltiples ESP32 si es necesario
+  esp32Devices: {},
   lights: {
     exteriores: false,
     salaComedor: false,
@@ -32,6 +32,13 @@ let systemState = {
     pasadizo: false,
     lavanderia: false
   },
+  sensors: {
+    gas: { level: 0, status: 'normal', lastUpdate: null },
+    temperature: { value: 0, status: 'normal', lastUpdate: null },
+    motion: { detected: false, lastDetection: null },
+    door: { open: false, lastChange: null }
+  },
+  alerts: [],
   lastUpdate: null,
   history: [],
   autoMode: false,
