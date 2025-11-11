@@ -13,7 +13,7 @@ export default function App() {
   const [sensors, setSensors] = useState({
     gas: { level: 0, status: 'normal' },
     temperature: { value: 0, status: 'normal' },
-    motion: { detected: false },
+    motion: { detected: false, securityMode: false },
     door: { open: false }
   });
   const [alerts, setAlerts] = useState([]);
@@ -42,6 +42,11 @@ export default function App() {
     socketRef.current.on('lights-update', setLights);
     socketRef.current.on('sensors-update', setSensors);
     socketRef.current.on('door-update', (door) => setSensors(prev => ({ ...prev, door })));
+    
+    socketRef.current.on('security-mode-changed', ({ enabled }) => {
+      setSensors(prev => ({ ...prev, motion: { ...prev.motion, securityMode: enabled } }));
+      showToast(`Modo seguridad ${enabled ? 'activado' : 'desactivado'}`, 'info');
+    });
     
     socketRef.current.on('new-alert', (alert) => {
       setAlerts(prev => [alert, ...prev.slice(0, 9)]);
@@ -99,6 +104,21 @@ export default function App() {
       showToast(`Puerta: ${action === 'open' ? 'Abriendo' : 'Cerrando'}`, 'info');
     } catch (error) {
       showToast('Error al controlar puerta', 'error');
+    }
+  };
+
+  const toggleSecurityMode = async () => {
+    try {
+      const newMode = !sensors.motion.securityMode;
+      await fetch(`${SERVER_URL}/api/security-mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newMode })
+      });
+      setSensors(prev => ({ ...prev, motion: { ...prev.motion, securityMode: newMode } }));
+      showToast(`Modo seguridad ${newMode ? 'activado' : 'desactivado'}`, 'success');
+    } catch (error) {
+      showToast('Error al cambiar modo seguridad', 'error');
     }
   };
 
@@ -173,8 +193,8 @@ export default function App() {
         <div className="header">
           <div className="header-content">
             <div>
-              <h1>Control de casa Inteligente</h1>
-              <p>Casa IOT</p>
+              <h1>Smart Home Control</h1>
+              <p>Sistema Inteligente Domótico</p>
             </div>
             <div className="header-controls">
               <button onClick={toggleAutoMode} className={`btn-control ${autoMode ? 'active' : ''}`}>
@@ -225,12 +245,21 @@ export default function App() {
             {/* Motion */}
             <div className={`sensor-card motion-${sensors.motion.detected ? 'detected' : 'normal'}`}>
               <Eye size={32} />
-              <div>
+              <div className="sensor-info">
                 <strong>Movimiento PIR</strong>
                 <p className="sensor-value">{sensors.motion.detected ? 'Detectado' : 'Sin movimiento'}</p>
-                <span className={`badge ${sensors.motion.detected ? 'badge-critico' : 'badge-normal'}`}>
-                  {sensors.motion.detected ? 'ACTIVO' : 'NORMAL'}
-                </span>
+                <div className="sensor-footer">
+                  <span className={`badge ${sensors.motion.detected ? 'badge-critico' : 'badge-normal'}`}>
+                    {sensors.motion.detected ? 'ACTIVO' : 'NORMAL'}
+                  </span>
+                  <button 
+                    onClick={toggleSecurityMode} 
+                    className={`btn-security ${sensors.motion.securityMode ? 'active' : ''}`}
+                    title={sensors.motion.securityMode ? 'Desactivar alertas' : 'Activar alertas'}
+                  >
+                    🔒 {sensors.motion.securityMode ? 'ON' : 'OFF'}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -378,9 +407,11 @@ export default function App() {
         .card { background: rgba(30, 41, 59, 0.5); backdrop-filter: blur(20px); border: 1px solid rgba(71, 85, 105, 0.3); border-radius: 20px; padding: 1.5rem; margin-bottom: 1.5rem; }
         .card h2 { display: flex; align-items: center; gap: 0.5rem; font-size: 1.25rem; margin-bottom: 1rem; }
         
-        .sensor-card { display: flex; align-items: center; gap: 1rem; padding: 1.25rem; border-radius: 16px; margin-bottom: 1rem; border: 2px solid; transition: all 0.3s; }
+        .sensor-card { display: flex; align-items: flex-start; gap: 1rem; padding: 1.25rem; border-radius: 16px; margin-bottom: 1rem; border: 2px solid; transition: all 0.3s; }
         .sensor-card strong { display: block; font-size: 1rem; }
         .sensor-value { font-size: 1.5rem; font-weight: 700; margin: 0.25rem 0; }
+        .sensor-info { flex: 1; }
+        .sensor-footer { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-top: 0.5rem; }
         
         .gas-normal { background: rgba(16, 185, 129, 0.1); border-color: #10b981; }
         .gas-bajo { background: rgba(251, 191, 36, 0.1); border-color: #fbbf24; }
@@ -400,6 +431,10 @@ export default function App() {
         .badge-medio { background: #f97316; color: #fff; }
         .badge-alto { background: #ef4444; color: #fff; }
         .badge-critico { background: #dc2626; color: #fff; animation: pulse 1s infinite; }
+        
+        .btn-security { padding: 0.25rem 0.75rem; border: 2px solid; border-radius: 8px; font-size: 0.75rem; font-weight: 700; cursor: pointer; transition: all 0.3s; background: rgba(100, 116, 139, 0.2); border-color: #64748b; color: #94a3b8; }
+        .btn-security.active { background: linear-gradient(135deg, #10b981, #059669); border-color: #10b981; color: #fff; box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4); }
+        .btn-security:hover { transform: scale(1.05); }
         
         .door-control { margin-top: 1rem; }
         .door-control h3 { display: flex; align-items: center; gap: 0.5rem; font-size: 1rem; margin-bottom: 1rem; }

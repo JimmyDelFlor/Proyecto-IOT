@@ -35,7 +35,7 @@ let systemState = {
   sensors: {
     gas: { level: 0, status: 'normal', lastUpdate: null },
     temperature: { value: 0, status: 'normal', lastUpdate: null },
-    motion: { detected: false, lastDetection: null },
+    motion: { detected: false, lastDetection: null, securityMode: false },
     door: { open: false, lastChange: null }
   },
   alerts: [],
@@ -67,8 +67,69 @@ function processArduinoMessage(message, deviceId = 'default') {
       const zone = parts[1];
       const state = parts[2] === 'ON';
       
-      updateLightState(zone, state, 'arduino');
+      if (zone === 'PUERTA') {
+        systemState.sensors.door.open = state;
+        systemState.sensors.door.lastChange = new Date().toISOString();
+        io.emit('door-update', systemState.sensors.door);
+      } else {
+        updateLightState(zone, state, 'arduino');
+      }
     }
+  }
+  
+  // Datos de sensores: SENSORS:gas,temp,pir,puerta
+  if (message.startsWith('SENSORS:')) {
+    const data = message.substring(8).split(',');
+    if (data.length >= 4) {
+      // Gas
+      const gasLevel = parseInt(data[0]);
+      systemState.sensors.gas.level = gasLevel;
+      systemState.sensors.gas.status = 
+        gasLevel < 50 ? 'normal' :
+        gasLevel < 150 ? 'bajo' :
+        gasLevel < 250 ? 'medio' :
+        gasLevel < 400 ? 'alto' : 'critico';
+      systemState.sensors.gas.lastUpdate = new Date().toISOString();
+      
+      // Temperatura
+      systemState.sensors.temperature.value = parseFloat(data[1]);
+      systemState.sensors.temperature.status = 
+        systemState.sensors.temperature.value >= 25 ? 'alta' : 'normal';
+      systemState.sensors.temperature.lastUpdate = new Date().toISOString();
+      
+      // PIR (Movimiento)
+      const motionDetected = data[2] === '1';
+      if (motionDetected && !systemState.sensors.motion.detected) {
+        systemState.sensors.motion.lastDetection = new Date().toISOString();
+      }
+      systemState.sensors.motion.detected = motionDetected;
+      
+      // Puerta
+      systemState.sensors.door.open = data[3] === '1';
+      
+      // Emitir actualización de sensores
+      io.emit('sensors-update', systemState.sensors);
+    }
+  }
+  
+  // Alertas
+  if (message.startsWith('ALERT:')) {
+    const alertData = message.substring(6);
+    const [type, ...valueParts] = alertData.split(':');
+    const value = valueParts.join(':');
+    
+    const alert = {
+      type,
+      value,
+      timestamp: new Date().toISOString(),
+      id: Date.now().toString()
+    };
+    
+    systemState.alerts.unshift(alert);
+    if (systemState.alerts.length > 50) systemState.alerts.pop();
+    
+    io.emit('new-alert', alert);
+    console.log(`🚨 ALERTA: ${type} - ${value}`);
   }
   
   if (message === 'ARDUINO:READY') {
@@ -196,6 +257,8 @@ app.get('/api/status', (req, res) => {
   res.json({
     esp32Devices: systemState.esp32Devices,
     lights: systemState.lights,
+    sensors: systemState.sensors,
+    alerts: systemState.alerts.slice(0, 10),
     lastUpdate: systemState.lastUpdate,
     autoMode: systemState.autoMode,
     statistics: {
@@ -302,6 +365,48 @@ app.delete('/api/schedule/:id', (req, res) => {
   io.emit('schedule-updated', systemState.schedule);
   
   res.json({ success: true });
+});
+
+// Obtener sensores
+app.get('/api/sensors', (req, res) => {
+  res.json({ sensors: systemState.sensors });
+});
+
+// Obtener alertas
+app.get('/api/alerts', (req, res) => {
+  const { limit = 20 } = req.query;
+  res.json({ alerts: systemState.alerts.slice(0, parseInt(limit)) });
+});
+
+// Limpiar alertas
+app.delete('/api/alerts', (req, res) => {
+  systemState.alerts = [];
+  res.json({ success: true });
+});
+
+// Control de puerta
+app.post('/api/door', (req, res) => {
+  const { action, deviceId = 'ESP32_GATEWAY_01' } = req.body;
+  
+  if (action !== 'open' && action !== 'close') {
+    return res.status(400).json({ error: 'Acción inválida. Use "open" o "close"' });
+  }
+  
+  const command = action === 'open' ? 'A' : 'C';
+  
+  console.log(`🚪 ${action === 'open' ? 'Abriendo' : 'Cerrando'} puerta`);
+  
+  io.emit('esp32-command', { command, deviceId });
+  
+  addToHistory({
+    type: 'door_command',
+    action,
+    deviceId,
+    timestamp: new Date().toISOString(),
+    source: 'api'
+  });
+  
+  res.json({ success: true, action, command });
 });
 
 // =====================================================
