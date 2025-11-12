@@ -280,7 +280,9 @@ app.post('/api/command', async (req, res) => {
   console.log(`📤 Enviando comando ${command} al dispositivo ${deviceId}`);
   
   // Emitir comando por Socket.IO al ESP32 conectado
-  io.emit('esp32-command', { command, deviceId });
+io.emit('esp32-command', { command, deviceId });   // para el panel web
+io.emit('message', JSON.stringify({ command }));   // para el ESP32
+
   
   systemState.statistics.totalCommands++;
   
@@ -396,7 +398,9 @@ app.post('/api/door', (req, res) => {
   
   console.log(`🚪 ${action === 'open' ? 'Abriendo' : 'Cerrando'} puerta`);
   
-  io.emit('esp32-command', { command, deviceId });
+  io.emit('esp32-command', { command, deviceId });   // para el panel web
+io.emit('message', JSON.stringify({ command }));   // para el ESP32
+
   
   addToHistory({
     type: 'door_command',
@@ -551,7 +555,9 @@ io.on('connection', (socket) => {
     const { command, deviceId = 'ESP32_GATEWAY_01' } = data;
     console.log(`📤 Comando desde web: ${command} → ${deviceId}`);
     
-    io.emit('esp32-command', { command, deviceId });
+    io.emit('esp32-command', { command, deviceId });   // notifica a la interfaz web
+    io.emit('message', JSON.stringify({ command }));   // envía al ESP32
+
     
     systemState.statistics.totalCommands++;
   });
