@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Power, Lightbulb, Home, Car, Utensils, Bed, ShowerHead, DoorOpen, Shirt, Wifi, WifiOff, Brain, Clock, TrendingUp, Zap, AlertCircle, CheckCircle, Activity, BarChart3, Thermometer, Wind, Eye, DoorClosed, AlertTriangle, Bell } from 'lucide-react';
-import io from 'socket.io-client';
+import { Power, Lightbulb, Home, Car, Utensils, Bed, ShowerHead, DoorOpen, Shirt, Wifi, WifiOff, Brain, Clock, TrendingUp, Zap, AlertCircle, CheckCircle, Activity, BarChart3, Thermometer, Wind, Eye, DoorClosed, AlertTriangle, Bell, Settings } from 'lucide-react';
 
-const SERVER_URL = 'http://localhost:5000';
+// CAMBIA ESTA URL POR LA IP DE TU SERVIDOR
+const SERVER_URL = 'http://10.145.65.93:5000';
 
 export default function App() {
   const [connected, setConnected] = useState(false);
+  const [connectionError, setConnectionError] = useState(null);
   const [lights, setLights] = useState({
     exteriores: false, salaComedor: false, cochera: false, cocina: false,
     cuarto: false, banio: false, pasadizo: false, lavanderia: false
@@ -23,80 +24,138 @@ export default function App() {
   const [patterns, setPatterns] = useState(null);
   const [statistics, setStatistics] = useState({ totalCommands: 0, totalEvents: 0, uptimeSeconds: 0 });
   const [showNotification, setShowNotification] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [customServerUrl, setCustomServerUrl] = useState(SERVER_URL);
   const socketRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
 
+  // Cargar URL guardada
   useEffect(() => {
-    socketRef.current = io(SERVER_URL);
-    
-    socketRef.current.on('connect', () => {
-      setConnected(true);
-      showToast('Conectado al servidor', 'success');
-      fetchSystemData();
-    });
-
-    socketRef.current.on('disconnect', () => {
-      setConnected(false);
-      showToast('Desconectado', 'error');
-    });
-
-    socketRef.current.on('lights-update', setLights);
-    socketRef.current.on('sensors-update', setSensors);
-    socketRef.current.on('door-update', (door) => setSensors(prev => ({ ...prev, door })));
-    
-    socketRef.current.on('security-mode-changed', ({ enabled }) => {
-      setSensors(prev => ({ ...prev, motion: { ...prev.motion, securityMode: enabled } }));
-      showToast(`Modo seguridad ${enabled ? 'activado' : 'desactivado'}`, 'info');
-    });
-    
-    socketRef.current.on('new-alert', (alert) => {
-      setAlerts(prev => [alert, ...prev.slice(0, 9)]);
-      showToast(`⚠️ ${alert.type}: ${alert.value}`, 'warning');
-    });
-    
-    socketRef.current.on('arduino-message', (data) => {
-      addMessage(data.message, 'info');
-    });
-
-    return () => {
-      if (socketRef.current) socketRef.current.disconnect();
-    };
+    const saved = localStorage.getItem('serverUrl');
+    if (saved) setCustomServerUrl(saved);
   }, []);
 
-  const fetchSystemData = async () => {
+  useEffect(() => {
+    connectToServer();
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+    };
+  }, [customServerUrl]);
+
+  const connectToServer = async () => {
     try {
-      const [statusRes, suggestionsRes, patternsRes, alertsRes] = await Promise.all([
-        fetch(`${SERVER_URL}/api/status`),
-        fetch(`${SERVER_URL}/api/ai/suggestions`),
-        fetch(`${SERVER_URL}/api/ai/patterns`),
-        fetch(`${SERVER_URL}/api/alerts`)
-      ]);
+      // Primero verificar que el servidor responda
+      const response = await fetch(`${customServerUrl}/api/status`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
+      });
 
-      const statusData = await statusRes.json();
-      const suggestionsData = await suggestionsRes.json();
-      const patternsData = await patternsRes.json();
-      const alertsData = await alertsRes.json();
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
 
-      setLights(statusData.lights);
-      setSensors(statusData.sensors);
-      setAutoMode(statusData.autoMode);
-      setStatistics(statusData.statistics);
-      setSuggestions(suggestionsData.suggestions);
-      setPatterns(patternsData.patterns);
-      setAlerts(alertsData.alerts);
+      // Si llegamos aquí, el servidor responde
+      setConnectionError(null);
+      addMessage('Servidor accesible, conectando WebSocket...', 'success');
+
+      // Cargar datos iniciales
+      const data = await response.json();
+      setLights(data.lights || {});
+      setSensors(data.sensors || {});
+      setAutoMode(data.autoMode || false);
+      setStatistics(data.statistics || {});
+
+      // Conectar Socket.IO (simulado con polling)
+      startPolling();
+
     } catch (error) {
-      console.error('Error:', error);
+      console.error('Error de conexión:', error);
+      setConnectionError(error.message);
+      setConnected(false);
+      addMessage(`Error: ${error.message}`, 'error');
+      
+      // Reintentar en 5 segundos
+      reconnectTimeoutRef.current = setTimeout(() => {
+        addMessage('Reintentando conexión...', 'info');
+        connectToServer();
+      }, 5000);
     }
   };
 
-  const sendCommand = (command) => {
-    if (socketRef.current?.connected) {
-      socketRef.current.emit('send-command', { command });
+  const startPolling = () => {
+    setConnected(true);
+    showToast('Conectado al servidor', 'success');
+    
+    // Polling cada 2 segundos
+    const pollInterval = setInterval(async () => {
+      try {
+        const [statusRes, suggestionsRes, patternsRes, alertsRes] = await Promise.all([
+          fetch(`${customServerUrl}/api/status`),
+          fetch(`${customServerUrl}/api/ai/suggestions`),
+          fetch(`${customServerUrl}/api/ai/patterns`),
+          fetch(`${customServerUrl}/api/alerts`)
+        ]);
+
+        if (!statusRes.ok) throw new Error('Servidor no responde');
+
+        const statusData = await statusRes.json();
+        const suggestionsData = await suggestionsRes.json();
+        const patternsData = await patternsRes.json();
+        const alertsData = await alertsRes.json();
+
+        setLights(statusData.lights);
+        setSensors(statusData.sensors);
+        setAutoMode(statusData.autoMode);
+        setStatistics(statusData.statistics);
+        setSuggestions(suggestionsData.suggestions);
+        setPatterns(patternsData.patterns);
+        setAlerts(alertsData.alerts);
+        
+        if (!connected) {
+          setConnected(true);
+          setConnectionError(null);
+        }
+      } catch (error) {
+        setConnected(false);
+        setConnectionError(error.message);
+        clearInterval(pollInterval);
+        
+        reconnectTimeoutRef.current = setTimeout(() => {
+          startPolling();
+        }, 5000);
+      }
+    }, 2000);
+
+    return () => clearInterval(pollInterval);
+  };
+
+  const sendCommand = async (command) => {
+    try {
+      const response = await fetch(`${customServerUrl}/api/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command })
+      });
+      
+      if (!response.ok) throw new Error('Error al enviar comando');
+      
+      const data = await response.json();
+      addMessage(`Comando ${command} enviado`, 'success');
+      return data;
+    } catch (error) {
+      showToast('Error al enviar comando', 'error');
+      console.error(error);
     }
   };
 
   const controlDoor = async (action) => {
     try {
-      await fetch(`${SERVER_URL}/api/door`, {
+      await fetch(`${customServerUrl}/api/door`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action })
@@ -110,7 +169,7 @@ export default function App() {
   const toggleSecurityMode = async () => {
     try {
       const newMode = !sensors.motion.securityMode;
-      await fetch(`${SERVER_URL}/api/security-mode`, {
+      await fetch(`${customServerUrl}/api/security-mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: newMode })
@@ -125,7 +184,7 @@ export default function App() {
   const toggleAutoMode = async () => {
     try {
       const newMode = !autoMode;
-      await fetch(`${SERVER_URL}/api/auto-mode`, {
+      await fetch(`${customServerUrl}/api/auto-mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: newMode })
@@ -163,6 +222,13 @@ export default function App() {
     sendCommand(state ? 17 : 18);
   };
 
+  const saveServerUrl = () => {
+    localStorage.setItem('serverUrl', customServerUrl);
+    showToast('URL guardada', 'success');
+    setShowSettings(false);
+    window.location.reload();
+  };
+
   const zones = [
     { key: 'exteriores', name: 'Exteriores', icon: Home, onCmd: 1, offCmd: 2, color: 'cyan' },
     { key: 'salaComedor', name: 'Sala', icon: Home, onCmd: 3, offCmd: 4, color: 'purple' },
@@ -188,15 +254,41 @@ export default function App() {
         </div>
       )}
 
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h2><Settings size={24} /> Configuración</h2>
+            <div className="settings-content">
+              <label>URL del Servidor:</label>
+              <input 
+                type="text" 
+                value={customServerUrl}
+                onChange={e => setCustomServerUrl(e.target.value)}
+                placeholder="http://192.168.1.100:5000"
+              />
+              <div className="modal-buttons">
+                <button onClick={saveServerUrl} className="btn-save">Guardar y Reconectar</button>
+                <button onClick={() => setShowSettings(false)} className="btn-cancel">Cancelar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="grid-container">
         {/* HEADER */}
         <div className="header">
           <div className="header-content">
             <div>
-              <h1>Control de casa Inteligente</h1>
-              <p>Casa IOT</p>
+              <h1>Smart Home Control</h1>
+              <p>Sistema Inteligente Domótico</p>
             </div>
             <div className="header-controls">
+              <button onClick={() => setShowSettings(true)} className="btn-control">
+                <Settings size={20} />
+                <span>Config</span>
+              </button>
               <button onClick={toggleAutoMode} className={`btn-control ${autoMode ? 'active' : ''}`}>
                 <Brain size={20} />
                 <span>{autoMode ? 'IA ON' : 'IA OFF'}</span>
@@ -208,6 +300,14 @@ export default function App() {
               </div>
             </div>
           </div>
+          
+          {connectionError && (
+            <div className="connection-error">
+              <AlertCircle size={20} />
+              <span>Error de conexión: {connectionError}</span>
+              <button onClick={connectToServer} className="btn-retry">Reintentar</button>
+            </div>
+          )}
           
           <div className="stats">
             <div className="stat blue"><Lightbulb size={20} /><div><strong>{lightsOn}/8</strong><span>Luces</span></div></div>
@@ -222,7 +322,6 @@ export default function App() {
           <div className="card">
             <h2><Activity size={20} /> Sensores</h2>
             
-            {/* Gas Sensor */}
             <div className={`sensor-card gas-${sensors.gas.status}`}>
               <Wind size={32} />
               <div>
@@ -232,7 +331,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Temperature */}
             <div className={`sensor-card temp-${sensors.temperature.status}`}>
               <Thermometer size={32} />
               <div>
@@ -242,7 +340,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Motion */}
             <div className={`sensor-card motion-${sensors.motion.detected ? 'detected' : 'normal'}`}>
               <Eye size={32} />
               <div className="sensor-info">
@@ -255,7 +352,6 @@ export default function App() {
                   <button 
                     onClick={toggleSecurityMode} 
                     className={`btn-security ${sensors.motion.securityMode ? 'active' : ''}`}
-                    title={sensors.motion.securityMode ? 'Desactivar alertas' : 'Activar alertas'}
                   >
                     🔒 {sensors.motion.securityMode ? 'ON' : 'OFF'}
                   </button>
@@ -263,7 +359,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Door Control */}
             <div className="door-control">
               <h3><DoorClosed size={20} /> Control de Puerta</h3>
               <div className={`door-status ${sensors.door.open ? 'open' : 'closed'}`}>
@@ -277,13 +372,12 @@ export default function App() {
             </div>
           </div>
 
-          {/* Alerts */}
           {alerts.length > 0 && (
             <div className="card alerts">
               <h2><Bell size={20} /> Alertas Recientes</h2>
               <div className="alerts-list">
-                {alerts.slice(0, 5).map(alert => (
-                  <div key={alert.id} className="alert-item">
+                {alerts.slice(0, 5).map((alert, idx) => (
+                  <div key={alert.id || idx} className="alert-item">
                     <AlertTriangle size={16} />
                     <div>
                       <strong>{alert.type}</strong>
@@ -349,7 +443,7 @@ export default function App() {
           )}
 
           <div className="card activity">
-            <h2><Activity size={20} /> Actividad <button onClick={fetchSystemData} className="btn-refresh"><Zap size={16} /></button></h2>
+            <h2><Activity size={20} /> Actividad <button onClick={connectToServer} className="btn-refresh"><Zap size={16} /></button></h2>
             <div className="log">
               {messages.length === 0 ? <p>Sin eventos...</p> : messages.map((m, i) => (
                 <div key={i} className={`log-entry ${m.type}`}>
@@ -386,14 +480,112 @@ export default function App() {
         .header h1 { font-size: 2.5rem; font-weight: 800; background: linear-gradient(135deg, #60a5fa, #a78bfa, #f472b6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin: 0; }
         .header p { color: #94a3b8; margin-top: 0.5rem; }
         
+        .connection-error {
+          display: flex;
+          align-items: center;
+          gap: 1rem;
+          padding: 1rem;
+          background: rgba(239, 68, 68, 0.1);
+          border: 1px solid #ef4444;
+          border-radius: 12px;
+          margin-bottom: 1rem;
+          color: #ef4444;
+        }
+        
+        .btn-retry {
+          padding: 0.5rem 1rem;
+          background: #ef4444;
+          border: none;
+          border-radius: 8px;
+          color: #fff;
+          font-weight: 600;
+          cursor: pointer;
+          margin-left: auto;
+        }
+        
         .header-controls { display: flex; gap: 1rem; }
         .btn-control { display: flex; align-items: center; gap: 0.5rem; padding: 0.875rem 1.5rem; border: none; border-radius: 12px; background: rgba(51, 65, 85, 0.6); color: #fff; font-weight: 600; cursor: pointer; transition: all 0.3s; }
         .btn-control.active { background: linear-gradient(135deg, #8b5cf6, #ec4899); box-shadow: 0 8px 32px rgba(139, 92, 246, 0.4); }
+        .btn-control:hover { background: rgba(71, 85, 105, 0.8); }
         
         .status { display: flex; align-items: center; gap: 0.5rem; padding: 0.875rem 1.5rem; border-radius: 12px; font-weight: 600; }
         .status.online { background: linear-gradient(135deg, #10b981, #059669); }
         .status.offline { background: linear-gradient(135deg, #ef4444, #dc2626); }
         .dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; animation: pulse 2s infinite; }
+        
+        .modal-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.8);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 1000;
+        }
+        
+        .modal {
+          background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.95));
+          border: 1px solid rgba(71, 85, 105, 0.5);
+          border-radius: 20px;
+          padding: 2rem;
+          max-width: 500px;
+          width: 90%;
+        }
+        
+        .modal h2 {
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+          margin-bottom: 1.5rem;
+        }
+        
+        .settings-content label {
+          display: block;
+          margin-bottom: 0.5rem;
+          color: #94a3b8;
+          font-size: 0.9rem;
+          font-weight: 600;
+        }
+        
+        .settings-content input {
+          width: 100%;
+          padding: 0.875rem;
+          background: rgba(51, 65, 85, 0.5);
+          border: 1px solid rgba(71, 85, 105, 0.5);
+          border-radius: 12px;
+          color: #fff;
+          font-size: 1rem;
+          margin-bottom: 1.5rem;
+        }
+        
+        .modal-buttons {
+          display: flex;
+          gap: 1rem;
+        }
+        
+        .btn-save, .btn-cancel {
+          flex: 1;
+          padding: 0.875rem;
+          border: none;
+          border-radius: 12px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.3s;
+        }
+        
+        .btn-save {
+          background: linear-gradient(135deg, #10b981, #059669);
+          color: #fff;
+        }
+        
+        .btn-cancel {
+          background: rgba(51, 65, 85, 0.6);
+          color: #fff;
+        }
+        
+        .btn-save:hover, .btn-cancel:hover {
+          transform: translateY(-2px);
+        }
         
         .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
         .stat { display: flex; align-items: center; gap: 1rem; padding: 1.25rem; border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px); }
@@ -530,13 +722,11 @@ export default function App() {
           50% { box-shadow: 0 0 20px 10px rgba(239, 68, 68, 0); }
         }
         
-        /* Scrollbar personalizado */
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.5); border-radius: 10px; }
         ::-webkit-scrollbar-thumb { background: rgba(71, 85, 105, 0.8); border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 1); }
         
-        /* Responsive */
         @media (max-width: 1400px) {
           .grid-container { grid-template-columns: 280px 1fr 280px; }
         }

@@ -1,25 +1,29 @@
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
-const { Server } = require('socket.io');
+const socketIO = require('socket.io');
+const WebSocket = require('ws');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
+
+// Socket.IO para clientes web (React)
+const io = socketIO(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
+
+// WebSocket raw para ESP32
+const wss = new WebSocket.Server({ server, path: '/raw' });
 
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public')); // Para servir archivos estáticos si es necesario
 
 // =====================================================
 // ESTADO DEL SISTEMA
 // =====================================================
+const rawWsClients = {};
+
 let systemState = {
   esp32Devices: {},
   lights: {
@@ -51,16 +55,84 @@ let systemState = {
 };
 
 // =====================================================
+// WEBSOCKET RAW PARA ESP32
+// =====================================================
+
+wss.on('connection', (ws, req) => {
+  console.log('🔌 WebSocket raw conectado (ESP32)');
+  let deviceId = null;
+
+  ws.on('message', (msg) => {
+    try {
+      const text = msg.toString();
+      const data = JSON.parse(text);
+      
+      // Identificación inicial del ESP32
+      if (data.type === 'esp32_connected' && data.deviceId) {
+        deviceId = data.deviceId;
+        rawWsClients[deviceId] = ws;
+        
+        systemState.esp32Devices[deviceId] = {
+          ...(systemState.esp32Devices[deviceId] || {}),
+          socketType: 'raw',
+          lastSeen: new Date().toISOString(),
+          connected: true
+        };
+        
+        console.log(`✅ ESP32 identificado: ${deviceId}`);
+        ws.send(JSON.stringify({ type: 'server_ack', ok: true }));
+        return;
+      }
+
+      // Heartbeat
+      if (data.type === 'heartbeat' && data.deviceId) {
+        if (systemState.esp32Devices[data.deviceId]) {
+          systemState.esp32Devices[data.deviceId].lastSeen = new Date().toISOString();
+        }
+        return;
+      }
+
+      // Mensaje del Arduino
+      if (data.message && data.deviceId) {
+        processArduinoMessage(data.message, data.deviceId);
+      }
+      
+    } catch (e) {
+      // No es JSON, puede ser mensaje directo
+      const text = msg.toString();
+      const foundId = Object.keys(rawWsClients).find(k => rawWsClients[k] === ws);
+      if (foundId && (text.startsWith('SENSORS:') || text.startsWith('ALERT:') || text.startsWith('OK:'))) {
+        processArduinoMessage(text, foundId);
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    if (deviceId) {
+      delete rawWsClients[deviceId];
+      console.log(`🔌 ESP32 desconectado: ${deviceId}`);
+      if (systemState.esp32Devices[deviceId]) {
+        systemState.esp32Devices[deviceId].connected = false;
+      }
+    }
+  });
+
+  ws.on('error', (error) => {
+    console.error('Error WebSocket:', error.message);
+  });
+});
+
+// =====================================================
 // FUNCIONES DE PROCESAMIENTO
 // =====================================================
 
 function processArduinoMessage(message, deviceId = 'default') {
-  console.log(`📨 [${deviceId}] Arduino:`, message);
+  console.log(`📨 [${deviceId}] ${message}`);
   
-  // Broadcast a todos los clientes web
+  // Broadcast a clientes web
   io.emit('arduino-message', { message, deviceId, timestamp: new Date().toISOString() });
   
-  // Procesar diferentes tipos de mensajes
+  // Procesar OK: (confirmaciones de luces)
   if (message.startsWith('OK:')) {
     const parts = message.split(':');
     if (parts.length >= 3) {
@@ -77,12 +149,11 @@ function processArduinoMessage(message, deviceId = 'default') {
     }
   }
   
-  // Datos de sensores: SENSORS:gas,temp,pir,puerta
+  // Procesar SENSORS: (datos de sensores)
   if (message.startsWith('SENSORS:')) {
     const data = message.substring(8).split(',');
     if (data.length >= 4) {
-      // Gas
-      const gasLevel = parseInt(data[0]);
+      const gasLevel = parseInt(data[0]) || 0;
       systemState.sensors.gas.level = gasLevel;
       systemState.sensors.gas.status = 
         gasLevel < 50 ? 'normal' :
@@ -91,28 +162,36 @@ function processArduinoMessage(message, deviceId = 'default') {
         gasLevel < 400 ? 'alto' : 'critico';
       systemState.sensors.gas.lastUpdate = new Date().toISOString();
       
-      // Temperatura
-      systemState.sensors.temperature.value = parseFloat(data[1]);
+      systemState.sensors.temperature.value = parseFloat(data[1]) || 0;
       systemState.sensors.temperature.status = 
         systemState.sensors.temperature.value >= 25 ? 'alta' : 'normal';
       systemState.sensors.temperature.lastUpdate = new Date().toISOString();
       
-      // PIR (Movimiento)
       const motionDetected = data[2] === '1';
       if (motionDetected && !systemState.sensors.motion.detected) {
         systemState.sensors.motion.lastDetection = new Date().toISOString();
+        
+        if (systemState.sensors.motion.securityMode) {
+          const alert = {
+            type: 'MOVIMIENTO_DETECTADO',
+            value: 'Sensor PIR activado',
+            timestamp: new Date().toISOString(),
+            id: Date.now().toString()
+          };
+          systemState.alerts.unshift(alert);
+          if (systemState.alerts.length > 50) systemState.alerts.pop();
+          io.emit('new-alert', alert);
+        }
       }
       systemState.sensors.motion.detected = motionDetected;
       
-      // Puerta
       systemState.sensors.door.open = data[3] === '1';
       
-      // Emitir actualización de sensores
       io.emit('sensors-update', systemState.sensors);
     }
   }
   
-  // Alertas
+  // Procesar ALERT:
   if (message.startsWith('ALERT:')) {
     const alertData = message.substring(6);
     const [type, ...valueParts] = alertData.split(':');
@@ -133,11 +212,10 @@ function processArduinoMessage(message, deviceId = 'default') {
   }
   
   if (message === 'ARDUINO:READY') {
-    console.log(`✓ [${deviceId}] Arduino está listo`);
+    console.log(`✓ [${deviceId}] Arduino LISTO`);
     io.emit('system-status', { type: 'arduino_ready', deviceId });
   }
   
-  // Agregar al historial
   addToHistory({
     type: 'arduino_message',
     message,
@@ -167,12 +245,10 @@ function updateLightState(zoneName, state, source = 'unknown') {
     systemState.lights[key] = state;
     systemState.lastUpdate = new Date().toISOString();
     
-    console.log(`💡 ${key}: ${previousState ? 'ON' : 'OFF'} → ${state ? 'ON' : 'OFF'} (${source})`);
+    console.log(`💡 ${key}: ${state ? 'ON' : 'OFF'} (${source})`);
     
-    // Emitir actualización de luces
     io.emit('lights-update', systemState.lights);
     
-    // Agregar al historial
     addToHistory({
       type: 'light_change',
       zone: key,
@@ -186,73 +262,81 @@ function updateLightState(zoneName, state, source = 'unknown') {
 
 function addToHistory(event) {
   systemState.history.push(event);
-  
-  // Mantener solo últimos 1000 eventos
-  if (systemState.history.length > 1000) {
-    systemState.history.shift();
-  }
-  
-  // Emitir nuevo evento
+  if (systemState.history.length > 1000) systemState.history.shift();
   io.emit('new-event', event);
 }
 
+function sendCommandToDevice(deviceId, command) {
+  const ws = rawWsClients[deviceId];
+  
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      const msg = JSON.stringify({ command });
+      ws.send(msg);
+      console.log(`✅ Enviado a ${deviceId}: ${command}`);
+      return true;
+    } catch (e) {
+      console.log('✖ Error:', e.message);
+    }
+  } else {
+    console.log(`⚠️ ${deviceId} no conectado`);
+  }
+  return false;
+}
+
 // =====================================================
-// RUTAS HTTP API - ESP32
+// RUTAS HTTP - ESP32
 // =====================================================
 
-// Registro de ESP32
 app.post('/api/esp32/register', (req, res) => {
-  const { deviceId, ip, rssi, arduinoReady } = req.body;
+  const { deviceId, ip, rssi, arduinoReady, version } = req.body;
   
-  console.log(`\n🔷 ESP32 REGISTRADO: ${deviceId}`);
-  console.log(`   IP: ${ip} | RSSI: ${rssi} dBm | Arduino: ${arduinoReady ? 'Ready' : 'Not Ready'}`);
+  const existing = systemState.esp32Devices[deviceId];
+  if (existing && existing.lastSeen) {
+    const timeSince = Date.now() - new Date(existing.lastSeen).getTime();
+    if (timeSince < 5000) {
+      systemState.esp32Devices[deviceId] = {
+        ...existing, ip, rssi, arduinoReady, version,
+        lastSeen: new Date().toISOString(), connected: true
+      };
+      return res.json({ success: true, message: 'Actualizado' });
+    }
+  }
+  
+  console.log(`🔷 ESP32: ${deviceId} | IP: ${ip} | RSSI: ${rssi} dBm`);
   
   systemState.esp32Devices[deviceId] = {
-    ip,
-    rssi,
-    arduinoReady,
-    lastSeen: new Date().toISOString(),
-    connected: true
+    ip, rssi, arduinoReady, version,
+    lastSeen: new Date().toISOString(), connected: true
   };
   
   io.emit('esp32-registered', { deviceId, ...systemState.esp32Devices[deviceId] });
-  
-  res.json({ success: true, message: 'ESP32 registrado correctamente' });
+  res.json({ success: true, message: 'Registrado' });
 });
 
-// Mensaje desde ESP32
 app.post('/api/esp32/message', (req, res) => {
   const { deviceId, message } = req.body;
-  
   processArduinoMessage(message, deviceId);
-  
   res.json({ success: true });
 });
 
-// Estado del ESP32
 app.post('/api/esp32/status', (req, res) => {
   const { deviceId, status, ip, rssi, uptime, arduinoReady } = req.body;
   
   if (systemState.esp32Devices[deviceId]) {
     systemState.esp32Devices[deviceId] = {
       ...systemState.esp32Devices[deviceId],
-      ip,
-      rssi,
-      uptime,
-      arduinoReady,
-      status,
+      ip, rssi, uptime, arduinoReady, status,
       lastSeen: new Date().toISOString()
     };
   }
-  
   res.json({ success: true });
 });
 
 // =====================================================
-// RUTAS HTTP API - CONTROL
+// RUTAS HTTP - CONTROL
 // =====================================================
 
-// Estado del sistema completo
 app.get('/api/status', (req, res) => {
   res.json({
     esp32Devices: systemState.esp32Devices,
@@ -269,90 +353,100 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// Enviar comando
-app.post('/api/command', async (req, res) => {
+app.post('/api/command', (req, res) => {
   const { command, deviceId = 'ESP32_GATEWAY_01' } = req.body;
   
   if (!command) {
-    return res.status(400).json({ error: 'Campo command requerido' });
+    return res.status(400).json({ error: 'Comando requerido' });
   }
   
-  console.log(`📤 Enviando comando ${command} al dispositivo ${deviceId}`);
+  console.log(`📤 Comando ${command} → ${deviceId}`);
   
-  // Emitir comando por Socket.IO al ESP32 conectado
-io.emit('esp32-command', { command, deviceId });   // para el panel web
-io.emit('message', JSON.stringify({ command }));   // para el ESP32
-
-  
+  const sent = sendCommandToDevice(deviceId, command);
   systemState.statistics.totalCommands++;
   
-  // Registrar en historial
   addToHistory({
     type: 'command_sent',
-    command,
-    deviceId,
+    command, deviceId,
     timestamp: new Date().toISOString(),
     source: 'api'
   });
   
-  res.json({ success: true, command, deviceId });
+  res.json({ success: true, command, sent });
 });
 
-// Historial
-app.get('/api/history', (req, res) => {
-  const { limit = 100, type } = req.query;
+app.post('/api/door', (req, res) => {
+  const { action, deviceId = 'ESP32_GATEWAY_01' } = req.body;
   
-  let history = systemState.history;
-  
-  if (type) {
-    history = history.filter(h => h.type === type);
+  if (action !== 'open' && action !== 'close') {
+    return res.status(400).json({ error: 'Acción inválida' });
   }
   
-  history = history.slice(-parseInt(limit));
+  const command = action === 'open' ? 'A' : 'C';
+  console.log(`🚪 Puerta: ${action}`);
   
+  const sent = sendCommandToDevice(deviceId, command);
+  
+  addToHistory({
+    type: 'door_command',
+    action, deviceId,
+    timestamp: new Date().toISOString(),
+    source: 'api'
+  });
+  
+  res.json({ success: true, action, command, sent });
+});
+
+app.post('/api/security-mode', (req, res) => {
+  const { enabled } = req.body;
+  systemState.sensors.motion.securityMode = enabled;
+  
+  console.log(`🔒 Modo seguridad: ${enabled ? 'ON' : 'OFF'}`);
+  io.emit('security-mode-changed', { enabled });
+  
+  addToHistory({
+    type: 'security_mode_change',
+    enabled,
+    timestamp: new Date().toISOString(),
+    source: 'api'
+  });
+  
+  res.json({ success: true, securityMode: enabled });
+});
+
+app.get('/api/history', (req, res) => {
+  const { limit = 100, type } = req.query;
+  let history = systemState.history;
+  if (type) history = history.filter(h => h.type === type);
+  history = history.slice(-parseInt(limit));
   res.json({ history, total: systemState.history.length });
 });
 
-// Limpiar historial
 app.delete('/api/history', (req, res) => {
   systemState.history = [];
-  res.json({ success: true, message: 'Historial limpiado' });
+  res.json({ success: true });
 });
 
-// =====================================================
-// SISTEMA DE AUTOMATIZACIÓN
-// =====================================================
-
-// Modo automático
 app.post('/api/auto-mode', (req, res) => {
   const { enabled } = req.body;
   systemState.autoMode = enabled;
-  
-  console.log(`🤖 Modo automático: ${enabled ? 'ACTIVADO' : 'DESACTIVADO'}`);
-  
+  console.log(`🤖 Auto: ${enabled ? 'ON' : 'OFF'}`);
   io.emit('auto-mode-changed', { enabled });
-  
-  res.json({ success: true, autoMode: systemState.autoMode });
+  res.json({ success: true, autoMode: enabled });
 });
 
-// Programación
 app.post('/api/schedule', (req, res) => {
   const { time, command, days, name } = req.body;
-  
   const rule = {
     id: Date.now().toString(),
-    time,
-    command,
+    time, command,
     days: days || [0,1,2,3,4,5,6],
-    name: name || 'Regla sin nombre',
+    name: name || 'Regla',
     enabled: true,
     created: new Date().toISOString()
   };
-  
   systemState.schedule.push(rule);
-  
   io.emit('schedule-updated', systemState.schedule);
-  
   res.json({ success: true, rule });
 });
 
@@ -361,171 +455,112 @@ app.get('/api/schedule', (req, res) => {
 });
 
 app.delete('/api/schedule/:id', (req, res) => {
-  const { id } = req.params;
-  systemState.schedule = systemState.schedule.filter(r => r.id !== id);
-  
+  systemState.schedule = systemState.schedule.filter(r => r.id !== req.params.id);
   io.emit('schedule-updated', systemState.schedule);
-  
   res.json({ success: true });
 });
 
-// Obtener sensores
 app.get('/api/sensors', (req, res) => {
   res.json({ sensors: systemState.sensors });
 });
 
-// Obtener alertas
 app.get('/api/alerts', (req, res) => {
   const { limit = 20 } = req.query;
   res.json({ alerts: systemState.alerts.slice(0, parseInt(limit)) });
 });
 
-// Limpiar alertas
 app.delete('/api/alerts', (req, res) => {
   systemState.alerts = [];
   res.json({ success: true });
 });
 
-// Control de puerta
-app.post('/api/door', (req, res) => {
-  const { action, deviceId = 'ESP32_GATEWAY_01' } = req.body;
-  
-  if (action !== 'open' && action !== 'close') {
-    return res.status(400).json({ error: 'Acción inválida. Use "open" o "close"' });
-  }
-  
-  const command = action === 'open' ? 'A' : 'C';
-  
-  console.log(`🚪 ${action === 'open' ? 'Abriendo' : 'Cerrando'} puerta`);
-  
-  io.emit('esp32-command', { command, deviceId });   // para el panel web
-io.emit('message', JSON.stringify({ command }));   // para el ESP32
-
-  
-  addToHistory({
-    type: 'door_command',
-    action,
-    deviceId,
-    timestamp: new Date().toISOString(),
-    source: 'api'
-  });
-  
-  res.json({ success: true, action, command });
-});
-
-// =====================================================
-// INTELIGENCIA ARTIFICIAL - PREPARADO
-// =====================================================
-
+// IA (básico)
 app.get('/api/ai/patterns', (req, res) => {
-  const patterns = analyzePatterns(systemState.history);
-  res.json({ patterns });
+  const hourCounts = {};
+  systemState.history.forEach(e => {
+    if (e.type === 'light_change' && e.state) {
+      const h = new Date(e.timestamp).getHours();
+      hourCounts[h] = (hourCounts[h] || 0) + 1;
+    }
+  });
+  const mostActiveHours = Object.entries(hourCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([hour, count]) => ({ hour: parseInt(hour), count }));
+  res.json({ patterns: { mostActiveHours, totalEvents: systemState.history.length } });
 });
 
 app.get('/api/ai/suggestions', (req, res) => {
-  const suggestions = generateSuggestions(systemState);
+  const suggestions = [];
+  const hour = new Date().getHours();
+  
+  if (hour >= 18 && hour <= 22 && !systemState.lights.exteriores) {
+    suggestions.push({
+      id: 'sec_1', type: 'security', priority: 'high',
+      message: 'Activar iluminación exterior', command: 1, icon: '🌙'
+    });
+  }
+  
+  if (hour >= 23 && Object.values(systemState.lights).some(l => l)) {
+    suggestions.push({
+      id: 'energy_1', type: 'energy_saving', priority: 'medium',
+      message: 'Apagar luces para ahorrar', command: 18, icon: '⚡'
+    });
+  }
+  
   res.json({ suggestions });
 });
 
 app.get('/api/ai/predict', (req, res) => {
-  const prediction = predictUsage(systemState.history);
-  res.json({ prediction });
+  res.json({
+    prediction: {
+      nextLikelyAction: 'Encender exteriores',
+      confidence: 0.75,
+      reason: 'Patrones históricos',
+      timeEstimate: '18:00 - 19:00'
+    }
+  });
 });
 
 // =====================================================
-// FUNCIONES IA (BÁSICAS - EXPANDIR DESPUÉS)
+// SOCKET.IO - CLIENTES WEB
 // =====================================================
 
-function analyzePatterns(history) {
-  const hourCounts = {};
-  const zoneCounts = {};
+io.on('connection', (socket) => {
+  console.log('🔌 Cliente web:', socket.id);
   
-  history.forEach(event => {
-    if (event.type === 'light_change' && event.state === true) {
-      const hour = new Date(event.timestamp).getHours();
-      hourCounts[hour] = (hourCounts[hour] || 0) + 1;
-      zoneCounts[event.zone] = (zoneCounts[event.zone] || 0) + 1;
-    }
+  socket.emit('lights-update', systemState.lights);
+  socket.emit('sensors-update', systemState.sensors);
+  socket.emit('esp32-devices', systemState.esp32Devices);
+  socket.emit('system-stats', systemState.statistics);
+  
+  socket.on('send-command', (data) => {
+    const { command, deviceId = 'ESP32_GATEWAY_01' } = data;
+    console.log(`📤 Web → ${deviceId}: ${command}`);
+    sendCommandToDevice(deviceId, command);
+    systemState.statistics.totalCommands++;
   });
   
-  return {
-    mostActiveHours: Object.entries(hourCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([hour, count]) => ({ hour: parseInt(hour), count })),
-    mostUsedZones: Object.entries(zoneCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([zone, count]) => ({ zone, count })),
-    totalEvents: history.length
-  };
-}
-
-function generateSuggestions(state) {
-  const suggestions = [];
-  const now = new Date();
-  const hour = now.getHours();
-  
-  if (hour >= 18 && hour <= 22 && !state.lights.exteriores) {
-    suggestions.push({
-      id: 'sec_1',
-      type: 'security',
-      priority: 'high',
-      message: 'Hora de activar iluminación exterior',
-      command: 1,
-      icon: '🌙'
-    });
-  }
-  
-  if (hour >= 23 && Object.values(state.lights).some(l => l)) {
-    suggestions.push({
-      id: 'energy_1',
-      type: 'energy_saving',
-      priority: 'medium',
-      message: 'Considera apagar luces para ahorrar energía',
-      command: 18,
-      icon: '⚡'
-    });
-  }
-  
-  if (hour >= 6 && hour <= 8 && !state.lights.cocina) {
-    suggestions.push({
-      id: 'routine_1',
-      type: 'routine',
-      priority: 'low',
-      message: 'Hora del desayuno - iluminar cocina',
-      command: 7,
-      icon: '☕'
-    });
-  }
-  
-  return suggestions;
-}
-
-function predictUsage(history) {
-  return {
-    nextLikelyAction: 'Encender luces exteriores',
-    confidence: 0.75,
-    reason: 'Basado en patrones históricos',
-    timeEstimate: '18:00 - 19:00'
-  };
-}
+  socket.on('disconnect', () => {
+    console.log('🔌 Cliente web desconectado');
+  });
+});
 
 // =====================================================
-// VERIFICADOR DE PROGRAMACIÓN
+// PROGRAMACIÓN AUTOMÁTICA
 // =====================================================
+
 setInterval(() => {
   if (!systemState.autoMode) return;
   
   const now = new Date();
-  const currentTime = `${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}`;
-  const currentDay = now.getDay();
+  const time = `${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}`;
+  const day = now.getDay();
   
-  systemState.schedule.forEach(async (rule) => {
-    if (rule.enabled && rule.time === currentTime && rule.days.includes(currentDay)) {
+  systemState.schedule.forEach(rule => {
+    if (rule.enabled && rule.time === time && rule.days.includes(day)) {
       console.log(`⏰ Ejecutando: ${rule.name}`);
-      
-      io.emit('esp32-command', { command: rule.command, deviceId: 'ESP32_GATEWAY_01' });
+      sendCommandToDevice('ESP32_GATEWAY_01', rule.command);
       
       addToHistory({
         type: 'scheduled_command',
@@ -539,65 +574,22 @@ setInterval(() => {
 }, 60000);
 
 // =====================================================
-// SOCKET.IO - COMUNICACIÓN TIEMPO REAL
-// =====================================================
-
-io.on('connection', (socket) => {
-  console.log('🔌 Cliente conectado:', socket.id);
-  
-  // Enviar estado actual
-  socket.emit('lights-update', systemState.lights);
-  socket.emit('esp32-devices', systemState.esp32Devices);
-  socket.emit('system-stats', systemState.statistics);
-  
-  // Comando desde cliente web
-  socket.on('send-command', (data) => {
-    const { command, deviceId = 'ESP32_GATEWAY_01' } = data;
-    console.log(`📤 Comando desde web: ${command} → ${deviceId}`);
-    
-    io.emit('esp32-command', { command, deviceId });   // notifica a la interfaz web
-    io.emit('message', JSON.stringify({ command }));   // envía al ESP32
-
-    
-    systemState.statistics.totalCommands++;
-  });
-  
-  // ESP32 enviando mensaje
-  socket.on('esp32-message', (data) => {
-    processArduinoMessage(data.message, data.deviceId);
-  });
-  
-  // Heartbeat desde ESP32
-  socket.on('heartbeat', (data) => {
-    const { deviceId } = data;
-    if (systemState.esp32Devices[deviceId]) {
-      systemState.esp32Devices[deviceId].lastSeen = new Date().toISOString();
-      systemState.esp32Devices[deviceId].connected = true;
-    }
-  });
-  
-  socket.on('disconnect', () => {
-    console.log('🔌 Cliente desconectado:', socket.id);
-  });
-});
-
-// =====================================================
 // INICIAR SERVIDOR
 // =====================================================
+
 const PORT = process.env.PORT || 5000;
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('\n' + '='.repeat(60));
-  console.log('🚀 SERVIDOR SMART HOME INICIADO');
+  console.log('🚀 SERVIDOR SMART HOME V3');
   console.log('='.repeat(60));
-  console.log(`📡 HTTP Server: http://0.0.0.0:${PORT}`);
+  console.log(`📡 HTTP: http://0.0.0.0:${PORT}`);
   console.log(`🔌 Socket.IO: ws://0.0.0.0:${PORT}`);
-  console.log(`⏰ Inicio: ${new Date().toLocaleString()}`);
+  console.log(`🌐 WebSocket raw: ws://0.0.0.0:${PORT}/raw`);
   console.log('='.repeat(60) + '\n');
-  console.log('Esperando conexión de ESP32...\n');
 });
 
 process.on('SIGINT', () => {
-  console.log('\n⚠️ Cerrando servidor...');
+  console.log('\n⚠️ Cerrando...');
   process.exit();
 });
