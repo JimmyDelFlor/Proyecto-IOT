@@ -148,6 +148,24 @@ function processArduinoMessage(message, deviceId = 'default') {
       }
     }
   }
+  // En el servidor, dentro de processArduinoMessage:
+if (message === 'OK:TODAS_ENCENDIDAS') {
+  Object.keys(systemState.lights).forEach(key => {
+    systemState.lights[key] = true;
+  });
+  systemState.lastUpdate = new Date().toISOString();
+  io.emit('lights-update', systemState.lights);
+  console.log('💡 Todas las luces: ON');
+}
+
+if (message === 'OK:TODAS_APAGADAS') {
+  Object.keys(systemState.lights).forEach(key => {
+    systemState.lights[key] = false;
+  });
+  systemState.lastUpdate = new Date().toISOString();
+  io.emit('lights-update', systemState.lights);
+  console.log('💡 Todas las luces: OFF');
+}
   
   // Procesar SENSORS: (datos de sensores)
   if (message.startsWith('SENSORS:')) {

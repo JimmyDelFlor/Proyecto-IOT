@@ -11,6 +11,7 @@ export default function App() {
     exteriores: false, salaComedor: false, cochera: false, cocina: false,
     cuarto: false, banio: false, pasadizo: false, lavanderia: false
   });
+  const [pendingLights, setPendingLights] = useState({}); // Nuevos estados pendientes
   const [sensors, setSensors] = useState({
     gas: { level: 0, status: 'normal' },
     temperature: { value: 0, status: 'normal' },
@@ -91,30 +92,56 @@ export default function App() {
     setConnected(true);
     showToast('Conectado al servidor', 'success');
     
-    // Polling cada 2 segundos
+    let pollCount = 0;
+    
+    // Polling rápido: cada 500ms para luces, cada 2s para el resto
     const pollInterval = setInterval(async () => {
+      pollCount++;
+      
       try {
-        const [statusRes, suggestionsRes, patternsRes, alertsRes] = await Promise.all([
-          fetch(`${customServerUrl}/api/status`),
-          fetch(`${customServerUrl}/api/ai/suggestions`),
-          fetch(`${customServerUrl}/api/ai/patterns`),
-          fetch(`${customServerUrl}/api/alerts`)
-        ]);
-
+        // SIEMPRE actualizar luces y sensores (más importante)
+        const statusRes = await fetch(`${customServerUrl}/api/status`);
+        
         if (!statusRes.ok) throw new Error('Servidor no responde');
-
+        
         const statusData = await statusRes.json();
-        const suggestionsData = await suggestionsRes.json();
-        const patternsData = await patternsRes.json();
-        const alertsData = await alertsRes.json();
-
-        setLights(statusData.lights);
+        
+        // Actualizar luces y limpiar estados pendientes que ya se confirmaron
+        setLights(prevLights => {
+          const newLights = statusData.lights;
+          setPendingLights(prevPending => {
+            const stillPending = {};
+            Object.keys(prevPending).forEach(key => {
+              // Si el estado real no coincide con el estado esperado, mantener como pendiente
+              if (newLights[key] !== prevPending[key]) {
+                stillPending[key] = prevPending[key];
+              }
+            });
+            return stillPending;
+          });
+          return newLights;
+        });
+        
         setSensors(statusData.sensors);
         setAutoMode(statusData.autoMode);
         setStatistics(statusData.statistics);
-        setSuggestions(suggestionsData.suggestions);
-        setPatterns(patternsData.patterns);
-        setAlerts(alertsData.alerts);
+        
+        // Cada 4 ciclos (2 segundos), actualizar sugerencias/patrones/alertas
+        if (pollCount % 4 === 0) {
+          const [suggestionsRes, patternsRes, alertsRes] = await Promise.all([
+            fetch(`${customServerUrl}/api/ai/suggestions`),
+            fetch(`${customServerUrl}/api/ai/patterns`),
+            fetch(`${customServerUrl}/api/alerts`)
+          ]);
+          
+          const suggestionsData = await suggestionsRes.json();
+          const patternsData = await patternsRes.json();
+          const alertsData = await alertsRes.json();
+          
+          setSuggestions(suggestionsData.suggestions);
+          setPatterns(patternsData.patterns);
+          setAlerts(alertsData.alerts);
+        }
         
         if (!connected) {
           setConnected(true);
@@ -129,7 +156,7 @@ export default function App() {
           startPolling();
         }, 5000);
       }
-    }, 2000);
+    }, 500); // ← Ahora cada 500ms en lugar de 2000ms
 
     return () => clearInterval(pollInterval);
   };
@@ -213,13 +240,40 @@ export default function App() {
 
   const toggleLight = (zone, onCmd, offCmd) => {
     const newState = !lights[zone];
-    setLights(prev => ({ ...prev, [zone]: newState }));
+    
+    // Actualización optimista: cambiar UI inmediatamente
+    setPendingLights(prev => ({ ...prev, [zone]: newState }));
+    
+    // Enviar comando
     sendCommand(newState ? onCmd : offCmd);
+    addMessage(`${zone}: ${newState ? 'Encendiendo' : 'Apagando'}...`, 'info');
+    
+    // Timeout de seguridad: si no se confirma en 3 segundos, revertir
+    setTimeout(() => {
+      setPendingLights(prev => {
+        const newPending = { ...prev };
+        delete newPending[zone];
+        return newPending;
+      });
+    }, 3000);
   };
 
   const toggleAll = (state) => {
-    setLights(Object.keys(lights).reduce((acc, key) => ({ ...acc, [key]: state }), {}));
+    // Actualización optimista para todas las luces
+    const allPending = Object.keys(lights).reduce((acc, key) => {
+      acc[key] = state;
+      return acc;
+    }, {});
+    setPendingLights(allPending);
+    
+    // Enviar comando
     sendCommand(state ? 17 : 18);
+    addMessage(`${state ? 'Encendiendo' : 'Apagando'} todas las luces...`, 'info');
+    
+    // Timeout de seguridad
+    setTimeout(() => {
+      setPendingLights({});
+    }, 3000);
   };
 
   const saveServerUrl = () => {
@@ -241,6 +295,16 @@ export default function App() {
   ];
 
   const lightsOn = Object.values(lights).filter(Boolean).length;
+  
+  // Función helper para obtener el estado actual (pendiente o real)
+  const getLightState = (zone) => {
+    return pendingLights.hasOwnProperty(zone) ? pendingLights[zone] : lights[zone];
+  };
+  
+  // Función helper para saber si una luz está pendiente
+  const isLightPending = (zone) => {
+    return pendingLights.hasOwnProperty(zone);
+  };
 
   return (
     <div className="app">
@@ -404,16 +468,25 @@ export default function App() {
           </div>
 
           <div className="lights-grid">
-            {zones.map(({ key, name, icon: Icon, onCmd, offCmd, color }) => (
-              <button key={key} onClick={() => toggleLight(key, onCmd, offCmd)} 
-                className={`light ${lights[key] ? 'on' : 'off'} color-${color}`}>
-                <div className="light-icon">
-                  {lights[key] ? <Lightbulb size={32} /> : <Icon size={32} />}
-                </div>
-                <strong>{name}</strong>
-                <span>{lights[key] ? '● ON' : '○ OFF'}</span>
-              </button>
-            ))}
+            {zones.map(({ key, name, icon: Icon, onCmd, offCmd, color }) => {
+              const currentState = getLightState(key);
+              const isPending = isLightPending(key);
+              
+              return (
+                <button 
+                  key={key} 
+                  onClick={() => toggleLight(key, onCmd, offCmd)} 
+                  className={`light ${currentState ? 'on' : 'off'} color-${color} ${isPending ? 'pending' : ''}`}
+                >
+                  <div className="light-icon">
+                    {currentState ? <Lightbulb size={32} /> : <Icon size={32} />}
+                  </div>
+                  <strong>{name}</strong>
+                  <span>{currentState ? '● ON' : '○ OFF'}</span>
+                  {isPending && <div className="pending-indicator"></div>}
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -676,6 +749,23 @@ export default function App() {
         .light.on.color-yellow .light-icon { background: rgba(255, 255, 255, 0.2); }
         .light.on.color-pink { background: linear-gradient(135deg, #ec4899, #db2777); color: #fff; }
         .light.on.color-pink .light-icon { background: rgba(255, 255, 255, 0.2); }
+        
+        .light.pending { opacity: 0.7; position: relative; }
+        .pending-indicator {
+          position: absolute;
+          top: 8px;
+          right: 8px;
+          width: 12px;
+          height: 12px;
+          background: #f59e0b;
+          border-radius: 50%;
+          animation: pulse-pending 1s infinite;
+        }
+        
+        @keyframes pulse-pending {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.5; transform: scale(1.2); }
+        }
         
         .suggestions .suggestion { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem; background: rgba(51, 65, 85, 0.4); border: 1px solid rgba(71, 85, 105, 0.3); border-radius: 14px; margin-bottom: 0.75rem; }
         .suggestion .icon { font-size: 1.5rem; margin-right: 0.5rem; }
