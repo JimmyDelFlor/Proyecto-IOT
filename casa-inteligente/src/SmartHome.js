@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
+import VoiceAssistant from './VoiceAssistant';
 import { Power, Lightbulb, Home, Car, Utensils, Bed, ShowerHead, DoorOpen, Shirt, Wifi, WifiOff, Brain, Clock, TrendingUp, Zap, AlertCircle, CheckCircle, Activity, BarChart3, Thermometer, Wind, Eye, DoorClosed, AlertTriangle, Bell, Settings } from 'lucide-react';
 
 // CAMBIA ESTA URL POR LA IP DE TU SERVIDOR
-const SERVER_URL = 'http://10.145.65.93:5000';
+const SERVER_URL = 'http://localhost:5000';
 
 export default function App() {
   const [connected, setConnected] = useState(false);
@@ -527,8 +528,9 @@ export default function App() {
             </div>
           </div>
         </div>
+        <VoiceAssistant serverUrl={SERVER_URL} />
       </div>
-
+      
       <style>{`
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Inter', -apple-system, sans-serif; background: #0a0e1a; color: #fff; }

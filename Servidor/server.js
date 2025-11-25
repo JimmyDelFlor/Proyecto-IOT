@@ -3,6 +3,7 @@ const cors = require('cors');
 const http = require('http');
 const socketIO = require('socket.io');
 const WebSocket = require('ws');
+const ollama = require('./ollama-integration');
 
 const app = express();
 const server = http.createServer(app);
@@ -540,6 +541,71 @@ app.get('/api/ai/predict', (req, res) => {
   });
 });
 
+// =====================================================
+// RUTAS HTTP - ASISTENTE OLLAMA
+// =====================================================
+
+app.post('/api/assistant', async (req, res) => {
+  const { message } = req.body;
+  
+  if (!message) {
+    return res.status(400).json({ error: 'Mensaje requerido' });
+  }
+  
+  try {
+    console.log(`🤖 Usuario: ${message}`);
+    
+    // Procesar con Ollama
+    const action = await ollama.processWithOllama(message, systemState);
+    
+    console.log(`🎯 Acción: ${JSON.stringify(action)}`);
+    
+    // Ejecutar acción según el tipo
+    let executed = false;
+    
+    if (action.action === 'command' && action.command) {
+      executed = sendCommandToDevice('ESP32_GATEWAY_01', action.command);
+      systemState.statistics.totalCommands++;
+    } else if (action.action === 'door' && action.command) {
+      executed = sendCommandToDevice('ESP32_GATEWAY_01', action.command);
+    }
+    
+    // Generar respuesta en lenguaje natural
+    const response = ollama.generateNaturalResponse(action, systemState);
+    
+    // Registrar en historial
+    addToHistory({
+      type: 'assistant_command',
+      message,
+      action: action.action,
+      response,
+      timestamp: new Date().toISOString(),
+      source: 'ollama'
+    });
+    
+    res.json({
+      success: true,
+      action: action.action,
+      response,
+      executed,
+      raw: action
+    });
+    
+  } catch (error) {
+    console.error('❌ Error Ollama:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Error al procesar con IA',
+      details: error.message 
+    });
+  }
+});
+
+// Estado de Ollama
+app.get('/api/assistant/status', async (req, res) => {
+  const status = await ollama.checkOllamaStatus();
+  res.json(status);
+});
 // =====================================================
 // SOCKET.IO - CLIENTES WEB
 // =====================================================
