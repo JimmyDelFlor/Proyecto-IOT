@@ -6,36 +6,40 @@
 #include <Servo.h>
 
 // --- PINES DE LUCES ---
-const int pinExteriores = 4;
-const int pinSalaComedor = 5;
-const int pinCochera = 6;
-const int pinCocina = 7;
-const int pinCuarto = 8;
-const int pinBanio = 9;
-const int pinPasadizo = 10;
-const int pinLavanderia = 11;
+const int pinExteriores   = 22;
+const int pinSalaComedor  = 23;
+const int pinCochera      = 24;
+const int pinCocina       = 25;
+const int pinCuarto       = 26;
+const int pinBanio        = 27;
+const int pinPasadizo     = 28;
+const int pinLavanderia   = 29;
 
 // --- SENSOR DE GAS MQ-6 ---
 const int pinSensorGas = A0;
-const int pinLedGas = 13;
-const int pinBuzzerGas = 12;
+const int pinLedGas    = 30;
+const int pinBuzzerGas = 31;
+
 
 // --- SENSOR PIR ---
-const int pinPIR = 2;
-const int pinLedPIR = 3;
+const int pinPIR    = 32;
+const int pinLedPIR = 33;
+
 
 // --- SENSOR LM35 ---
-const int pinTemp = A1;
-const int pinLedTemp = 11;  // Comparte con lavandería
+const int pinTemp    = A1;
+const int pinLedTemp = 34;   // Ya no comparte con lavandería
 const int umbralTemp = 25;
+
 
 // --- SERVO PUERTA ---
 Servo puertaGaraje;
-int pinServo = 6;  // Comparte físicamente con cochera
+const int pinServo = 35;
+
 int posicionCerrada = 0;
 int posicionAbierta = 90;
 bool puertaAbierta = false;
-bool enMovimiento = false;
+bool enMovimiento  = false;
 int velocidadServo = 25;
 
 // --- VARIABLES SENSORES ---
