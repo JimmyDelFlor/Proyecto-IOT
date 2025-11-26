@@ -6,7 +6,7 @@
 const fetch = require('node-fetch'); // Necesitas: npm install node-fetch@2
 
 // Configuración Ollama
-const OLLAMA_URL = 'http://localhost:11434'; // URL de tu Ollama local
+const OLLAMA_URL = 'https://unwainscotted-nonconsequentially-willene.ngrok-free.dev'; // URL de tu Ollama local
 const MODEL = 'llama3.2'; // Modelo a usar (ajustar según disponibilidad)
 
 // Contexto del sistema para Ollama
