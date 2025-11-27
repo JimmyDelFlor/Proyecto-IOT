@@ -1,19 +1,26 @@
 // =====================================================
-// OLLAMA INTEGRATION MODULE
-// Agregar al servidor Node.js existente
+// OLLAMA INTEGRATION MODULE - FIXED VERSION
 // =====================================================
 
-const fetch = require('node-fetch'); // Necesitas: npm install node-fetch@2
+// Usar fetch nativo en Node 18+ o require para versiones anteriores
+let fetch;
+try {
+  // Node 18+ tiene fetch nativo
+  fetch = globalThis.fetch;
+} catch (e) {
+  // Node < 18 necesita node-fetch
+  fetch = require('node-fetch');
+}
 
 // Configuración Ollama
-const OLLAMA_URL = 'https://unwainscotted-nonconsequentially-willene.ngrok-free.dev'; // URL de tu Ollama local
-const MODEL = 'llama3.2'; // Modelo a usar (ajustar según disponibilidad)
+const OLLAMA_URL = process.env.OLLAMA_URL || 'https://unwainscotted-nonconsequentially-willene.ngrok-free.dev';
+const MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
 
 // Contexto del sistema para Ollama
 const SYSTEM_CONTEXT = `Eres un asistente virtual de una casa inteligente IoT. Tu trabajo es interpretar comandos en lenguaje natural y convertirlos en acciones específicas.
 
 COMANDOS DISPONIBLES:
-- Luces individuales: 1-16 (números pares apagan, impares encienden)
+- Luces individuales (números impares encienden, pares apagan):
   * Exteriores: ON=1, OFF=2
   * Sala/Comedor: ON=3, OFF=4
   * Cochera: ON=5, OFF=6
@@ -31,17 +38,17 @@ SENSORES DISPONIBLES:
 - motion: detección de movimiento (PIR)
 - door: estado de puerta (abierta/cerrada)
 
-REGLAS:
-1. Responde SOLO con un JSON válido
+REGLAS CRÍTICAS:
+1. Responde SOLO con un JSON válido, sin texto adicional
 2. Si el usuario pide encender/apagar luces, devuelve: {"action": "command", "command": NÚMERO}
 3. Si pide información de sensores, devuelve: {"action": "query", "sensor": "NOMBRE_SENSOR"}
 4. Si pide abrir/cerrar puerta, devuelve: {"action": "door", "command": "A" o "C"}
-5. Si es conversación general o no entiendes, devuelve: {"action": "chat", "response": "tu respuesta"}
+5. Si es conversación general, devuelve: {"action": "chat", "response": "tu respuesta"}
 6. NUNCA incluyas explicaciones fuera del JSON
 
 EJEMPLOS:
 Usuario: "enciende las luces de la sala"
-Respuesta: {"action": "command", "command": 3, "zone": "salaComedor"}
+Respuesta: {"action": "command", "command": 3}
 
 Usuario: "apaga todo"
 Respuesta: {"action": "command", "command": 18}
@@ -52,8 +59,8 @@ Respuesta: {"action": "query", "sensor": "temperature"}
 Usuario: "abre la puerta"
 Respuesta: {"action": "door", "command": "A"}
 
-Usuario: "hola cómo estás"
-Respuesta: {"action": "chat", "response": "¡Hola! Estoy aquí para ayudarte con tu casa inteligente. ¿Qué necesitas?"}`;
+Usuario: "hola"
+Respuesta: {"action": "chat", "response": "¡Hola! ¿Qué necesitas?"}`;
 
 // =====================================================
 // FUNCIÓN PRINCIPAL: Procesar comando con Ollama
@@ -66,28 +73,32 @@ async function processWithOllama(userMessage, systemState) {
 - Luces encendidas: ${Object.entries(systemState.lights).filter(([k,v]) => v).map(([k]) => k).join(', ') || 'ninguna'}
 - Temperatura: ${systemState.sensors.temperature.value}°C
 - Gas: nivel ${systemState.sensors.gas.level} (${systemState.sensors.gas.status})
-- Movimiento detectado: ${systemState.sensors.motion.detected ? 'SÍ' : 'NO'}
+- Movimiento: ${systemState.sensors.motion.detected ? 'SÍ' : 'NO'}
 - Puerta: ${systemState.sensors.door.open ? 'ABIERTA' : 'CERRADA'}
 
 Usuario: ${userMessage}`;
 
-    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: MODEL,
-        prompt: contextMessage,
-        system: SYSTEM_CONTEXT,
-        stream: false,
-        temperature: 0.3, // Baja temperatura para respuestas más deterministas
-        options: {
-          num_predict: 150 // Limitar tokens
-        }
-      })
-    });
+   const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+  method: 'POST',
+  headers: { 
+    'Content-Type': 'application/json',
+    'ngrok-skip-browser-warning': 'true',  // ← AGREGAR ESTO
+    'User-Agent': 'SmartHome/1.0'          // ← Y ESTO
+  },
+  body: JSON.stringify({
+    model: MODEL,
+    prompt: contextMessage,
+    system: SYSTEM_CONTEXT,
+    stream: false,
+    temperature: 0.2,
+    options: {
+      num_predict: 100
+    }
+  })
+});
 
     if (!response.ok) {
-      throw new Error(`Ollama error: ${response.status}`);
+      throw new Error(`Ollama HTTP ${response.status}`);
     }
 
     const data = await response.json();
@@ -98,7 +109,7 @@ Usuario: ${userMessage}`;
     // Intentar parsear JSON
     let parsedResponse;
     try {
-      // Limpiar respuesta (a veces Ollama agrega texto extra)
+      // Buscar JSON en la respuesta
       const jsonMatch = rawResponse.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         parsedResponse = JSON.parse(jsonMatch[0]);
@@ -106,22 +117,82 @@ Usuario: ${userMessage}`;
         throw new Error('No JSON found');
       }
     } catch (e) {
-      console.warn('⚠️ Ollama no devolvió JSON válido, usando fallback');
-      parsedResponse = {
-        action: 'chat',
-        response: rawResponse || 'No entendí tu solicitud. ¿Puedes reformularla?'
-      };
+      console.warn('⚠️ Ollama no devolvió JSON válido');
+      
+      // Fallback: interpretar manualmente
+      parsedResponse = fallbackParser(userMessage, rawResponse);
     }
 
     return parsedResponse;
 
   } catch (error) {
     console.error('❌ Error Ollama:', error.message);
-    return {
-      action: 'error',
-      response: 'Error al procesar con IA. ¿Está Ollama ejecutándose?'
-    };
+    
+    // Fallback si Ollama falla
+    return fallbackParser(userMessage, '');
   }
+}
+
+// =====================================================
+// PARSER DE FALLBACK (sin Ollama)
+// =====================================================
+
+function fallbackParser(message, aiResponse) {
+  const msg = message.toLowerCase();
+  
+  // Detectar encender/prender/activar
+  if (msg.match(/encien|prend|activ/)) {
+    if (msg.includes('todo') || msg.includes('todas')) return { action: 'command', command: 17 };
+    if (msg.includes('exterior')) return { action: 'command', command: 1 };
+    if (msg.includes('sala') || msg.includes('comedor')) return { action: 'command', command: 3 };
+    if (msg.includes('cochera') || msg.includes('garage')) return { action: 'command', command: 5 };
+    if (msg.includes('cocina')) return { action: 'command', command: 7 };
+    if (msg.includes('cuarto') || msg.includes('dormitorio')) return { action: 'command', command: 9 };
+    if (msg.includes('baño') || msg.includes('banio')) return { action: 'command', command: 11 };
+    if (msg.includes('pasadizo') || msg.includes('pasillo')) return { action: 'command', command: 13 };
+    if (msg.includes('lavanderia') || msg.includes('lavandería')) return { action: 'command', command: 15 };
+  }
+  
+  // Detectar apagar/desactivar
+  if (msg.match(/apag|desactiv|desconect/)) {
+    if (msg.includes('todo') || msg.includes('todas')) return { action: 'command', command: 18 };
+    if (msg.includes('exterior')) return { action: 'command', command: 2 };
+    if (msg.includes('sala') || msg.includes('comedor')) return { action: 'command', command: 4 };
+    if (msg.includes('cochera') || msg.includes('garage')) return { action: 'command', command: 6 };
+    if (msg.includes('cocina')) return { action: 'command', command: 8 };
+    if (msg.includes('cuarto') || msg.includes('dormitorio')) return { action: 'command', command: 10 };
+    if (msg.includes('baño') || msg.includes('banio')) return { action: 'command', command: 12 };
+    if (msg.includes('pasadizo') || msg.includes('pasillo')) return { action: 'command', command: 14 };
+    if (msg.includes('lavanderia') || msg.includes('lavandería')) return { action: 'command', command: 16 };
+  }
+  
+  // Detectar puerta
+  if (msg.includes('abre') || msg.includes('abrir')) {
+    if (msg.includes('puerta')) return { action: 'door', command: 'A' };
+  }
+  if (msg.includes('cierra') || msg.includes('cerrar')) {
+    if (msg.includes('puerta')) return { action: 'door', command: 'C' };
+  }
+  
+  // Detectar consultas de sensores
+  if (msg.match(/temperatura|cuántos grados|qué temperatura/)) {
+    return { action: 'query', sensor: 'temperature' };
+  }
+  if (msg.match(/gas|fuga|huele/)) {
+    return { action: 'query', sensor: 'gas' };
+  }
+  if (msg.match(/movimiento|alguien|persona/)) {
+    return { action: 'query', sensor: 'motion' };
+  }
+  if (msg.match(/puerta.*abierta|puerta.*cerrada|estado.*puerta/)) {
+    return { action: 'query', sensor: 'door' };
+  }
+  
+  // Si no se detecta nada, chat
+  return {
+    action: 'chat',
+    response: aiResponse || 'No entendí tu solicitud. Intenta: "enciende las luces de la sala" o "¿cuál es la temperatura?"'
+  };
 }
 
 // =====================================================
@@ -132,17 +203,23 @@ async function checkOllamaStatus() {
   try {
     const response = await fetch(`${OLLAMA_URL}/api/tags`, {
       method: 'GET',
-      timeout: 3000
+      headers: {
+        'ngrok-skip-browser-warning': 'true',  // ← AGREGAR
+        'User-Agent': 'SmartHome/1.0'          // ← AGREGAR
+      },
+      signal: AbortSignal.timeout(5000) // Aumentar timeout
     });
     
     if (response.ok) {
       const data = await response.json();
       return {
         available: true,
-        models: data.models.map(m => m.name)
+        models: data.models.map(m => m.name),
+        url: OLLAMA_URL,
+        model: MODEL
       };
     }
-    return { available: false };
+    return { available: false, status: response.status };
   } catch (error) {
     return { available: false, error: error.message };
   }
@@ -204,66 +281,3 @@ module.exports = {
   checkOllamaStatus,
   generateNaturalResponse
 };
-
-// =====================================================
-// INSTRUCCIONES DE INTEGRACIÓN:
-// =====================================================
-/*
-
-1. Instalar Ollama en tu sistema:
-   - Linux/Mac: curl https://ollama.ai/install.sh | sh
-   - Windows: Descargar de https://ollama.ai
-   
-2. Descargar modelo:
-   ollama pull llama3.2
-   
-3. Agregar al server.js principal:
-
-   const ollama = require('./ollama-integration');
-   
-   // Ruta para el asistente
-   app.post('/api/assistant', async (req, res) => {
-     const { message } = req.body;
-     
-     if (!message) {
-       return res.status(400).json({ error: 'Mensaje requerido' });
-     }
-     
-     try {
-       // Procesar con Ollama
-       const action = await ollama.processWithOllama(message, systemState);
-       
-       // Ejecutar acción
-       let executed = false;
-       if (action.action === 'command') {
-         executed = sendCommandToDevice('ESP32_GATEWAY_01', action.command);
-       } else if (action.action === 'door') {
-         executed = sendCommandToDevice('ESP32_GATEWAY_01', action.command);
-       }
-       
-       // Generar respuesta
-       const response = ollama.generateNaturalResponse(action, systemState);
-       
-       res.json({
-         success: true,
-         action: action.action,
-         response,
-         executed,
-         raw: action
-       });
-       
-     } catch (error) {
-       res.status(500).json({ error: error.message });
-     }
-   });
-   
-   // Estado de Ollama
-   app.get('/api/assistant/status', async (req, res) => {
-     const status = await ollama.checkOllamaStatus();
-     res.json(status);
-   });
-
-4. Instalar dependencia:
-   npm install node-fetch@2
-
-*/

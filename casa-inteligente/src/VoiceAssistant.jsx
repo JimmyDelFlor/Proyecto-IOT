@@ -5,18 +5,21 @@ import { Mic, MicOff, Send, MessageSquare, Bot, User, Loader } from 'lucide-reac
 // COMPONENTE: ASISTENTE VIRTUAL CON VOZ
 // =====================================================
 
-export default function VoiceAssistant({ serverUrl }) {
+export default function VoiceAssistant({ serverUrl, socket }) {
   const [messages, setMessages] = useState([
-    { role: 'assistant', content: '¡Hola! Soy tu asistente de casa inteligente. Puedes escribir o usar el micrófono. Prueba: "enciende las luces de la sala" o "¿cuál es la temperatura?"' }
+    { role: 'assistant', content: '¡Hola! Soy tu asistente de casa inteligente. Di "JARVIS" al ESP32 o escribe aquí. Prueba: "enciende las luces de la sala"' }
   ]);
   const [input, setInput] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [ollamaStatus, setOllamaStatus] = useState(null);
   const [showAssistant, setShowAssistant] = useState(false);
+  const [micPermission, setMicPermission] = useState('prompt');
+  const [esp32Listening, setEsp32Listening] = useState(false); // Estado de escucha del ESP32
   
   const recognitionRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const recognitionTimeoutRef = useRef(null);
 
   // =====================================================
   // INICIALIZACIÓN - Web Speech API
@@ -30,15 +33,32 @@ export default function VoiceAssistant({ serverUrl }) {
       recognitionRef.current = new SpeechRecognition();
       recognitionRef.current.continuous = false;
       recognitionRef.current.interimResults = false;
-      recognitionRef.current.lang = 'es-ES'; // Español
+      recognitionRef.current.lang = 'es-ES';
+      recognitionRef.current.maxAlternatives = 1;
+      
+      recognitionRef.current.onstart = () => {
+        console.log('🎤 Reconocimiento iniciado');
+        setIsListening(true);
+        
+        recognitionTimeoutRef.current = setTimeout(() => {
+          if (recognitionRef.current && isListening) {
+            recognitionRef.current.stop();
+            addMessage('assistant', '⏱️ Tiempo agotado. No detecté ningún audio. Intenta de nuevo.');
+          }
+        }, 10000);
+      };
       
       recognitionRef.current.onresult = (event) => {
+        if (recognitionTimeoutRef.current) {
+          clearTimeout(recognitionTimeoutRef.current);
+        }
+        
         const transcript = event.results[0][0].transcript;
-        console.log('🎤 Reconocido:', transcript);
+        const confidence = event.results[0][0].confidence;
+        console.log('🎤 Reconocido:', transcript, '(confianza:', confidence, ')');
         setInput(transcript);
         setIsListening(false);
         
-        // Enviar automáticamente después de reconocer
         setTimeout(() => handleSendMessage(transcript), 300);
       };
       
@@ -46,24 +66,76 @@ export default function VoiceAssistant({ serverUrl }) {
         console.error('Error reconocimiento:', event.error);
         setIsListening(false);
         
+        if (recognitionTimeoutRef.current) {
+          clearTimeout(recognitionTimeoutRef.current);
+        }
+        
         if (event.error === 'no-speech') {
-          addMessage('assistant', 'No detecté tu voz. Intenta de nuevo.');
-        } else if (event.error === 'not-allowed') {
-          addMessage('assistant', 'Necesito permiso para usar el micrófono. Por favor, actívalo en tu navegador.');
+          addMessage('assistant', '🎤 No detecté tu voz. Asegúrate de hablar cerca del micrófono e intenta de nuevo.');
+        } else if (event.error === 'not-allowed' || event.error === 'permission-denied') {
+          setMicPermission('denied');
+          addMessage('assistant', '❌ Necesito permiso para usar el micrófono. Por favor, actívalo en tu navegador.');
+        } else if (event.error === 'aborted') {
+          // No mostrar mensaje
+        } else if (event.error === 'audio-capture') {
+          addMessage('assistant', '❌ No puedo acceder al micrófono. Verifica que esté conectado y funcionando.');
+        } else {
+          addMessage('assistant', `❌ Error: ${event.error}. Intenta de nuevo.`);
         }
       };
       
       recognitionRef.current.onend = () => {
+        console.log('🎤 Reconocimiento finalizado');
         setIsListening(false);
+        
+        if (recognitionTimeoutRef.current) {
+          clearTimeout(recognitionTimeoutRef.current);
+        }
       };
     }
     
     // Verificar estado de Ollama
     checkOllamaStatus();
-    const interval = setInterval(checkOllamaStatus, 30000); // Cada 30s
+    const interval = setInterval(checkOllamaStatus, 30000);
     
-    return () => clearInterval(interval);
-  }, []);
+    // Escuchar eventos de voz del ESP32 vía socket
+    if (socket) {
+      socket.on('wake-word-detected', (data) => {
+        console.log('🎤 Wake word detectado en ESP32:', data);
+        setEsp32Listening(true);
+        addMessage('assistant', '🎤 ESP32 activado. Escuchando...');
+      });
+      
+      socket.on('voice-transcript', (data) => {
+        console.log('📝 Transcripción del ESP32:', data);
+        if (data.transcript) {
+          addMessage('user', `🎤 ${data.transcript}`);
+          setEsp32Listening(false);
+        }
+      });
+      
+      socket.on('voice-processed', (data) => {
+        console.log('✅ Comando de voz procesado:', data);
+        if (data.response) {
+          addMessage('assistant', data.response);
+        }
+        setEsp32Listening(false);
+      });
+    }
+    
+    return () => {
+      clearInterval(interval);
+      if (recognitionTimeoutRef.current) {
+        clearTimeout(recognitionTimeoutRef.current);
+      }
+      
+      if (socket) {
+        socket.off('wake-word-detected');
+        socket.off('voice-transcript');
+        socket.off('voice-processed');
+      }
+    };
+  }, [socket]);
 
   // Scroll automático al final
   useEffect(() => {
@@ -93,14 +165,41 @@ export default function VoiceAssistant({ serverUrl }) {
     if (isListening) {
       recognitionRef.current.stop();
       setIsListening(false);
+      addMessage('assistant', '⏸️ Reconocimiento detenido.');
     } else {
       try {
-        recognitionRef.current.start();
-        setIsListening(true);
-        addMessage('assistant', '🎤 Escuchando... Habla ahora.');
+        // Verificar permisos de micrófono primero
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          navigator.mediaDevices.getUserMedia({ audio: true })
+            .then(() => {
+              // Permiso concedido, iniciar reconocimiento
+              recognitionRef.current.start();
+              addMessage('assistant', '🎤 Escuchando... Habla ahora (tienes ~5 segundos).');
+            })
+            .catch((error) => {
+              console.error('Error de permisos:', error);
+              addMessage('assistant', '❌ No puedo acceder al micrófono. Verifica los permisos en tu navegador.');
+              setIsListening(false);
+            });
+        } else {
+          // Fallback para navegadores sin getUserMedia
+          recognitionRef.current.start();
+          addMessage('assistant', '🎤 Escuchando... Habla ahora (tienes ~5 segundos).');
+        }
       } catch (error) {
         console.error('Error al iniciar:', error);
-        setIsListening(false);
+        
+        if (error.name === 'InvalidStateError') {
+          // Ya está corriendo, detenerlo primero
+          recognitionRef.current.stop();
+          setTimeout(() => {
+            recognitionRef.current.start();
+            addMessage('assistant', '🎤 Escuchando... Habla ahora (tienes ~5 segundos).');
+          }, 100);
+        } else {
+          addMessage('assistant', '❌ Error al iniciar el micrófono. Intenta de nuevo.');
+          setIsListening(false);
+        }
       }
     }
   };
@@ -193,6 +292,11 @@ export default function VoiceAssistant({ serverUrl }) {
                 <span className={`status ${ollamaStatus?.available ? 'online' : 'offline'}`}>
                   {ollamaStatus?.available ? '🟢 Ollama Online' : '🔴 Ollama Offline'}
                 </span>
+                {esp32Listening && (
+                  <span className="esp32-status">
+                    🎤 ESP32 escuchando...
+                  </span>
+                )}
               </div>
             </div>
             <button onClick={() => setShowAssistant(false)} className="close-btn">✕</button>
@@ -246,30 +350,49 @@ export default function VoiceAssistant({ serverUrl }) {
 
           {/* Input */}
           <div className="assistant-input">
-            <button 
-              onClick={toggleListening}
-              className={`mic-btn ${isListening ? 'listening' : ''}`}
-              disabled={isProcessing}
-            >
-              {isListening ? <MicOff size={20} /> : <Mic size={20} />}
-            </button>
+            {isListening && (
+              <div className="listening-indicator">
+                <div className="pulse-ring"></div>
+                <div className="pulse-ring delay-1"></div>
+                <div className="pulse-ring delay-2"></div>
+                <span>Escuchando...</span>
+              </div>
+            )}
             
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
-              placeholder={isListening ? 'Escuchando...' : 'Escribe o usa el micrófono...'}
-              disabled={isProcessing || isListening}
-            />
+            {micPermission === 'denied' && (
+              <div className="mic-warning">
+                ⚠️ Micrófono bloqueado. <a href="#" onClick={(e) => { e.preventDefault(); window.open('chrome://settings/content/microphone'); }}>Activar permisos</a>
+              </div>
+            )}
             
-            <button 
-              onClick={() => handleSendMessage()}
-              className="send-btn"
-              disabled={!input.trim() || isProcessing}
-            >
-              <Send size={20} />
-            </button>
+            <div>
+              <button 
+                onClick={toggleListening}
+                className={`mic-btn ${isListening ? 'listening' : ''}`}
+                disabled={isProcessing}
+                title={isListening ? 'Detener' : 'Hablar'}
+              >
+                {isListening ? <MicOff size={20} /> : <Mic size={20} />}
+              </button>
+              
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyPress={handleKeyPress}
+                placeholder={isListening ? '🎤 Escuchando...' : 'Escribe o usa el micrófono...'}
+                disabled={isProcessing || isListening}
+              />
+              
+              <button 
+                onClick={() => handleSendMessage()}
+                className="send-btn"
+                disabled={!input.trim() || isProcessing}
+                title="Enviar"
+              >
+                <Send size={20} />
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -363,6 +486,15 @@ export default function VoiceAssistant({ serverUrl }) {
         .header-info .status {
           font-size: 0.75rem;
           color: #94a3b8;
+        }
+        
+        .esp32-status {
+          display: block;
+          margin-top: 0.25rem;
+          font-size: 0.75rem;
+          color: #ef4444;
+          font-weight: 600;
+          animation: pulse 1.5s infinite;
         }
         
         .close-btn {
@@ -498,9 +630,74 @@ export default function VoiceAssistant({ serverUrl }) {
         
         .assistant-input {
           display: flex;
+          flex-direction: column;
           gap: 0.75rem;
           padding: 1rem;
           border-top: 1px solid rgba(71, 85, 105, 0.3);
+        }
+        
+        .listening-indicator {
+          position: relative;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0.75rem;
+          background: linear-gradient(135deg, rgba(239, 68, 68, 0.1), rgba(220, 38, 38, 0.05));
+          border: 1px solid rgba(239, 68, 68, 0.3);
+          border-radius: 12px;
+          color: #ef4444;
+          font-weight: 600;
+          font-size: 0.9rem;
+        }
+        
+        .pulse-ring {
+          position: absolute;
+          left: 1rem;
+          width: 12px;
+          height: 12px;
+          border: 2px solid #ef4444;
+          border-radius: 50%;
+          animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+        }
+        
+        .pulse-ring.delay-1 {
+          animation-delay: 0.3s;
+        }
+        
+        .pulse-ring.delay-2 {
+          animation-delay: 0.6s;
+        }
+        
+        @keyframes pulse-ring {
+          0% {
+            transform: scale(0.8);
+            opacity: 1;
+          }
+          100% {
+            transform: scale(2.5);
+            opacity: 0;
+          }
+        }
+        
+        .mic-warning {
+          padding: 0.75rem;
+          background: rgba(245, 158, 11, 0.1);
+          border: 1px solid rgba(245, 158, 11, 0.3);
+          border-radius: 12px;
+          color: #f59e0b;
+          font-size: 0.85rem;
+          text-align: center;
+        }
+        
+        .mic-warning a {
+          color: #fbbf24;
+          text-decoration: underline;
+          margin-left: 0.5rem;
+        }
+        
+        .assistant-input > div:last-of-type {
+          display: flex;
+          gap: 0.75rem;
         }
         
         .mic-btn, .send-btn {

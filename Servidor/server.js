@@ -3,7 +3,7 @@ const cors = require('cors');
 const http = require('http');
 const socketIO = require('socket.io');
 const WebSocket = require('ws');
-const ollama = require('./ollama-integration');
+
 
 const app = express();
 const server = http.createServer(app);
@@ -541,65 +541,6 @@ app.get('/api/ai/predict', (req, res) => {
   });
 });
 
-// =====================================================
-// RUTAS HTTP - ASISTENTE OLLAMA
-// =====================================================
-
-app.post('/api/assistant', async (req, res) => {
-  const { message } = req.body;
-  
-  if (!message) {
-    return res.status(400).json({ error: 'Mensaje requerido' });
-  }
-  
-  try {
-    console.log(`🤖 Usuario: ${message}`);
-    
-    // Procesar con Ollama
-    const action = await ollama.processWithOllama(message, systemState);
-    
-    console.log(`🎯 Acción: ${JSON.stringify(action)}`);
-    
-    // Ejecutar acción según el tipo
-    let executed = false;
-    
-    if (action.action === 'command' && action.command) {
-      executed = sendCommandToDevice('ESP32_GATEWAY_01', action.command);
-      systemState.statistics.totalCommands++;
-    } else if (action.action === 'door' && action.command) {
-      executed = sendCommandToDevice('ESP32_GATEWAY_01', action.command);
-    }
-    
-    // Generar respuesta en lenguaje natural
-    const response = ollama.generateNaturalResponse(action, systemState);
-    
-    // Registrar en historial
-    addToHistory({
-      type: 'assistant_command',
-      message,
-      action: action.action,
-      response,
-      timestamp: new Date().toISOString(),
-      source: 'ollama'
-    });
-    
-    res.json({
-      success: true,
-      action: action.action,
-      response,
-      executed,
-      raw: action
-    });
-    
-  } catch (error) {
-    console.error('❌ Error Ollama:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'Error al procesar con IA',
-      details: error.message 
-    });
-  }
-});
 
 // Estado de Ollama
 app.get('/api/assistant/status', async (req, res) => {
@@ -656,7 +597,279 @@ setInterval(() => {
     }
   });
 }, 60000);
+// =====================================================
+// RUTAS HTTP - ASISTENTE OLLAMA
+// =====================================================
 
+// Importar módulo Ollama (asegúrate de tener ollama-integration.js en la misma carpeta)
+let ollama;
+try {
+  ollama = require('./ollama-integration');
+  console.log('✓ Módulo Ollama cargado');
+} catch (error) {
+  console.warn('⚠️ No se pudo cargar ollama-integration.js:', error.message);
+  console.warn('   El asistente de IA no estará disponible');
+}
+
+// Ruta para procesar comandos del asistente
+app.post('/api/assistant', async (req, res) => {
+  const { message } = req.body;
+  
+  if (!message) {
+    return res.status(400).json({ error: 'Mensaje requerido' });
+  }
+  
+  if (!ollama) {
+    return res.status(503).json({ 
+      success: false,
+      error: 'Módulo Ollama no disponible',
+      response: 'El asistente de IA no está configurado correctamente.'
+    });
+  }
+  
+  try {
+    console.log(`🤖 Usuario: ${message}`);
+    
+    // Procesar con Ollama
+    const action = await ollama.processWithOllama(message, systemState);
+    
+    console.log(`🎯 Acción interpretada:`, action);
+    
+    // Ejecutar acción según el tipo
+    let executed = false;
+    
+    if (action.action === 'command' && action.command !== undefined) {
+      executed = sendCommandToDevice('ESP32_GATEWAY_01', action.command);
+      systemState.statistics.totalCommands++;
+      
+      addToHistory({
+        type: 'assistant_command',
+        message,
+        action: action.action,
+        command: action.command,
+        timestamp: new Date().toISOString(),
+        source: 'ollama'
+      });
+    } else if (action.action === 'door' && action.command) {
+      executed = sendCommandToDevice('ESP32_GATEWAY_01', action.command);
+      
+      addToHistory({
+        type: 'assistant_door',
+        message,
+        action: action.action,
+        command: action.command,
+        timestamp: new Date().toISOString(),
+        source: 'ollama'
+      });
+    }
+    
+    // Generar respuesta en lenguaje natural
+    const response = ollama.generateNaturalResponse(action, systemState);
+    
+    res.json({
+      success: true,
+      action: action.action,
+      response,
+      executed,
+      raw: action
+    });
+    
+  } catch (error) {
+    console.error('❌ Error Ollama:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Error al procesar con IA',
+      details: error.message,
+      response: '❌ Error al procesar con IA. Verifica que Ollama esté ejecutándose.'
+    });
+  }
+});
+
+// Ruta para verificar estado de Ollama
+app.get('/api/assistant/status', async (req, res) => {
+  if (!ollama) {
+    return res.json({ 
+      available: false, 
+      error: 'Módulo Ollama no cargado',
+      message: 'Asegúrate de crear el archivo ollama-integration.js'
+    });
+  }
+  
+  try {
+    const status = await ollama.checkOllamaStatus();
+    res.json(status);
+  } catch (error) {
+    res.json({ 
+      available: false, 
+      error: error.message 
+    });
+  }
+});
+
+// =====================================================
+// RUTAS HTTP - VOZ (ESP32)
+// =====================================================
+
+// Recibir transcripción del ESP32
+app.post('/api/voice/transcript', async (req, res) => {
+  const { deviceId, transcript, timestamp } = req.body;
+  
+  if (!transcript) {
+    return res.status(400).json({ error: 'Transcript requerido' });
+  }
+  
+  console.log(`🎤 [${deviceId}] Transcripción: "${transcript}"`);
+  
+  try {
+    // Emitir a clientes web que se está procesando voz
+    io.emit('voice-transcript', {
+      deviceId,
+      transcript,
+      timestamp: new Date().toISOString(),
+      processing: true
+    });
+    
+    // Procesar con Ollama (igual que texto)
+    let action;
+    let response;
+    
+    if (ollama) {
+      action = await ollama.processWithOllama(transcript, systemState);
+      console.log(`🎯 Acción interpretada:`, action);
+      
+      // Ejecutar acción
+      let executed = false;
+      
+      if (action.action === 'command' && action.command !== undefined) {
+        executed = sendCommandToDevice(deviceId || 'ESP32_GATEWAY_01', action.command);
+        systemState.statistics.totalCommands++;
+      } else if (action.action === 'door' && action.command) {
+        executed = sendCommandToDevice(deviceId || 'ESP32_GATEWAY_01', action.command);
+      }
+      
+      // Generar respuesta
+      response = ollama.generateNaturalResponse(action, systemState);
+      
+      // Registrar en historial
+      addToHistory({
+        type: 'voice_command',
+        deviceId,
+        transcript,
+        action: action.action,
+        command: action.command || action.sensor,
+        response,
+        timestamp: new Date().toISOString(),
+        source: 'esp32_voice'
+      });
+      
+      // Emitir resultado a clientes web
+      io.emit('voice-processed', {
+        deviceId,
+        transcript,
+        action: action.action,
+        response,
+        executed,
+        timestamp: new Date().toISOString()
+      });
+      
+      // Enviar respuesta de voz al ESP32 (opcional)
+      const ws = rawWsClients[deviceId];
+      if (ws && ws.readyState === 1) { // WebSocket.OPEN
+        ws.send(JSON.stringify({
+          type: 'voice_response',
+          response,
+          action: action.action
+        }));
+      }
+      
+      res.json({
+        success: true,
+        transcript,
+        action: action.action,
+        response,
+        executed
+      });
+      
+    } else {
+      // Sin Ollama, responder con mensaje genérico
+      res.json({
+        success: true,
+        transcript,
+        response: 'Comando de voz recibido pero Ollama no está disponible'
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error procesando voz:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Recibir eventos de voz (wake word, etc)
+app.post('/api/voice/event', (req, res) => {
+  const { deviceId, event, timestamp } = req.body;
+  
+  console.log(`🎤 [${deviceId}] Evento de voz: ${event}`);
+  
+  // Emitir a clientes web
+  io.emit('voice-event', {
+    deviceId,
+    event,
+    timestamp: new Date().toISOString()
+  });
+  
+  // Si es wake word, notificar especialmente
+  if (event === 'wake_word_detected') {
+    io.emit('wake-word-detected', {
+      deviceId,
+      timestamp: new Date().toISOString()
+    });
+  }
+  
+  res.json({ success: true });
+});
+
+// Endpoint para subir audio raw y procesarlo con STT
+// (Para implementación futura con Whisper o similar)
+app.post('/api/voice/stt', async (req, res) => {
+  // Este endpoint recibiría audio raw del ESP32
+  // y lo procesaría con un servicio STT
+  
+  // Ejemplo con Whisper local:
+  // const audioBuffer = req.body;
+  // const transcript = await processWithWhisper(audioBuffer);
+  
+  res.status(501).json({
+    error: 'STT no implementado aún',
+    message: 'Por ahora, envía el texto transcrito directamente'
+  });
+});
+
+// =====================================================
+// EVENTOS SOCKET.IO - VOZ
+// =====================================================
+
+// Agregar al bloque io.on('connection', ...) existente:
+
+io.on('connection', (socket) => {
+  // ... código existente ...
+  
+  // Escuchar cuando el usuario hace click en "activar voz" desde web
+  socket.on('activate-voice-listening', (data) => {
+    const { deviceId = 'ESP32_GATEWAY_01' } = data;
+    console.log(`🎤 Activar escucha de voz en ${deviceId}`);
+    
+    // Enviar comando al ESP32 para forzar activación
+    const ws = rawWsClients[deviceId];
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        type: 'activate_listening'
+      }));
+    }
+  }); });
 // =====================================================
 // INICIAR SERVIDOR
 // =====================================================
