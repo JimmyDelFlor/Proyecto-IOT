@@ -20,27 +20,38 @@ const int pinSensorGas = A0;
 const int pinLedGas    = 30;
 const int pinBuzzerGas = 31;
 
-
 // --- SENSOR PIR ---
 const int pinPIR    = 32;
 const int pinLedPIR = 33;
 
-
 // --- SENSOR LM35 ---
 const int pinTemp    = A1;
-const int pinLedTemp = 34;   // Ya no comparte con lavandería
+const int pinLedTemp = 34;
 const int umbralTemp = 25;
 
+// =====================================================================
+// NUEVO: SERVOS - 2 PUERTAS
+// =====================================================================
+Servo puertaGaraje;      // Servo original (cochera)
+Servo puertaPrincipal;   // ← NUEVO: Servo puerta principal
 
-// --- SERVO PUERTA ---
-Servo puertaGaraje;
-const int pinServo = 35;
+const int pinServoGaraje = 35;     // Pin original
+const int pinServoPrincipal = 36;  // ← NUEVO: Pin servo principal
 
-int posicionCerrada = 0;
-int posicionAbierta = 90;
-bool puertaAbierta = false;
-bool enMovimiento  = false;
+// Puerta Garaje (original)
+int posicionCerradaGaraje = 0;
+int posicionAbiertaGaraje = 90;
+bool puertaGarajeAbierta = false;
+bool enMovimientoGaraje = false;
+
+// ← NUEVO: Puerta Principal
+int posicionCerradaPrincipal = 0;
+int posicionAbiertaPrincipal = 90;
+bool puertaPrincipalAbierta = false;
+bool enMovimientoPrincipal = false;
+
 int velocidadServo = 25;
+// =====================================================================
 
 // --- VARIABLES SENSORES ---
 int valorSensor = 0;
@@ -69,7 +80,7 @@ bool estadoLavanderia = false;
 
 // --- TIEMPOS PARA ENVÍO ---
 unsigned long ultimoEnvioSensores = 0;
-const unsigned long intervaloSensores = 2000; // Cada 2 segundos
+const unsigned long intervaloSensores = 2000;
 
 void setup() {
   Serial.begin(115200);
@@ -97,9 +108,12 @@ void setup() {
   // Sensor temperatura
   pinMode(pinLedTemp, OUTPUT);
   
-  // Servo
-  puertaGaraje.attach(pinServo);
-  puertaGaraje.write(posicionCerrada);
+  // ← NUEVO: Configurar ambos servos
+  puertaGaraje.attach(pinServoGaraje);
+  puertaGaraje.write(posicionCerradaGaraje);
+  
+  puertaPrincipal.attach(pinServoPrincipal);
+  puertaPrincipal.write(posicionCerradaPrincipal);
   
   apagarTodas();
 }
@@ -119,7 +133,7 @@ void loop() {
   leerSensorGas();
   leerSensorPIR();
   leerSensorTemp();
-  mantenerPosicionPuerta();
+  mantenerPosicionPuertas(); // ← MODIFICADO: Ahora mantiene ambas
   
   // Enviar datos de sensores periódicamente
   if (millis() - ultimoEnvioSensores >= intervaloSensores) {
@@ -141,11 +155,18 @@ void procesarComando(String cmd) {
   if (comando == 0 && cmd.length() == 1) {
     char c = cmd.charAt(0);
     
+    // ← MODIFICADO: Comandos de puertas
     if (c == 'A') {
-      abrirPuerta();
+      abrirPuertaPrincipal();  // A = Abrir Principal
       return;
     } else if (c == 'C') {
-      cerrarPuerta();
+      cerrarPuertaPrincipal(); // C = Cerrar Principal
+      return;
+    } else if (c == 'G') {
+      abrirPuertaGaraje();     // G = Abrir Garaje
+      return;
+    } else if (c == 'H') {
+      cerrarPuertaGaraje();    // H = Cerrar Garaje (cHerrar)
       return;
     } else if (c == 'S') {
       enviarEstadoCompleto();
@@ -153,7 +174,7 @@ void procesarComando(String cmd) {
     }
   }
   
-  // Comandos numéricos de luces
+  // Comandos numéricos de luces (SIN CAMBIOS)
   switch (comando) {
     case 1:
       controlarLuz(pinExteriores, true);
@@ -253,7 +274,7 @@ void procesarComando(String cmd) {
 }
 
 // =====================================================================
-// CONTROL DE LUCES
+// CONTROL DE LUCES (SIN CAMBIOS)
 // =====================================================================
 
 void controlarLuz(int pin, bool estado) {
@@ -308,7 +329,7 @@ void enviarConfirmacion(String zona, bool estado) {
 }
 
 // =====================================================================
-// SENSOR DE GAS MQ-6
+// SENSOR DE GAS MQ-6 (SIN CAMBIOS)
 // =====================================================================
 
 void calibrarSensorGas() {
@@ -357,7 +378,6 @@ void leerSensorGas() {
     }
   }
   
-  // Enviar alerta si supera umbral crítico
   static bool alertaEnviada = false;
   if (nivelGas >= UMBRAL_CRITICO && !alertaEnviada) {
     Serial.println("ALERT:GAS_CRITICO:" + String(nivelGas));
@@ -368,7 +388,7 @@ void leerSensorGas() {
 }
 
 // =====================================================================
-// SENSOR PIR
+// SENSOR PIR (SIN CAMBIOS)
 // =====================================================================
 
 void leerSensorPIR() {
@@ -390,7 +410,7 @@ void leerSensorPIR() {
 }
 
 // =====================================================================
-// SENSOR LM35
+// SENSOR LM35 (SIN CAMBIOS)
 // =====================================================================
 
 void leerSensorTemp() {
@@ -412,56 +432,105 @@ void leerSensorTemp() {
 }
 
 // =====================================================================
-// SERVO PUERTA
+// NUEVO: SERVOS - 2 PUERTAS
 // =====================================================================
 
-void abrirPuerta() {
-  if (puertaAbierta) {
-    Serial.println("INFO:PUERTA_YA_ABIERTA");
+// --- PUERTA PRINCIPAL ---
+void abrirPuertaPrincipal() {
+  if (puertaPrincipalAbierta) {
+    Serial.println("INFO:PUERTA_PRINCIPAL_YA_ABIERTA");
     return;
   }
   
-  enMovimiento = true;
-  Serial.println("INFO:ABRIENDO_PUERTA");
+  enMovimientoPrincipal = true;
+  Serial.println("INFO:ABRIENDO_PUERTA_PRINCIPAL");
   
-  for (int pos = posicionCerrada; pos <= posicionAbierta; pos++) {
+  for (int pos = posicionCerradaPrincipal; pos <= posicionAbiertaPrincipal; pos++) {
+    puertaPrincipal.write(pos);
+    delay(velocidadServo);
+  }
+  
+  puertaPrincipal.write(posicionAbiertaPrincipal);
+  puertaPrincipalAbierta = true;
+  enMovimientoPrincipal = false;
+  Serial.println("OK:PUERTA_PRINCIPAL:ON");
+}
+
+void cerrarPuertaPrincipal() {
+  if (!puertaPrincipalAbierta) {
+    Serial.println("INFO:PUERTA_PRINCIPAL_YA_CERRADA");
+    return;
+  }
+  
+  enMovimientoPrincipal = true;
+  Serial.println("INFO:CERRANDO_PUERTA_PRINCIPAL");
+  
+  for (int pos = posicionAbiertaPrincipal; pos >= posicionCerradaPrincipal; pos--) {
+    puertaPrincipal.write(pos);
+    delay(velocidadServo);
+  }
+  
+  puertaPrincipal.write(posicionCerradaPrincipal);
+  puertaPrincipalAbierta = false;
+  enMovimientoPrincipal = false;
+  Serial.println("OK:PUERTA_PRINCIPAL:OFF");
+}
+
+// --- PUERTA GARAJE (RENOMBRADO) ---
+void abrirPuertaGaraje() {
+  if (puertaGarajeAbierta) {
+    Serial.println("INFO:PUERTA_GARAJE_YA_ABIERTA");
+    return;
+  }
+  
+  enMovimientoGaraje = true;
+  Serial.println("INFO:ABRIENDO_PUERTA_GARAJE");
+  
+  for (int pos = posicionCerradaGaraje; pos <= posicionAbiertaGaraje; pos++) {
     puertaGaraje.write(pos);
     delay(velocidadServo);
   }
   
-  puertaGaraje.write(posicionAbierta);
-  puertaAbierta = true;
-  enMovimiento = false;
-  Serial.println("OK:PUERTA:ABIERTA");
+  puertaGaraje.write(posicionAbiertaGaraje);
+  puertaGarajeAbierta = true;
+  enMovimientoGaraje = false;
+  Serial.println("OK:PUERTA_COCHERA:ON");
 }
 
-void cerrarPuerta() {
-  if (!puertaAbierta) {
-    Serial.println("INFO:PUERTA_YA_CERRADA");
+void cerrarPuertaGaraje() {
+  if (!puertaGarajeAbierta) {
+    Serial.println("INFO:PUERTA_GARAJE_YA_CERRADA");
     return;
   }
   
-  enMovimiento = true;
-  Serial.println("INFO:CERRANDO_PUERTA");
+  enMovimientoGaraje = true;
+  Serial.println("INFO:CERRANDO_PUERTA_GARAJE");
   
-  for (int pos = posicionAbierta; pos >= posicionCerrada; pos--) {
+  for (int pos = posicionAbiertaGaraje; pos >= posicionCerradaGaraje; pos--) {
     puertaGaraje.write(pos);
     delay(velocidadServo);
   }
   
-  puertaGaraje.write(posicionCerrada);
-  puertaAbierta = false;
-  enMovimiento = false;
-  Serial.println("OK:PUERTA:CERRADA");
+  puertaGaraje.write(posicionCerradaGaraje);
+  puertaGarajeAbierta = false;
+  enMovimientoGaraje = false;
+  Serial.println("OK:PUERTA_COCHERA:OFF");
 }
 
-void mantenerPosicionPuerta() {
+// ← MODIFICADO: Mantener posición de ambas puertas
+void mantenerPosicionPuertas() {
   static unsigned long ultimo = 0;
   if (millis() - ultimo > 2000) {
-    if (!enMovimiento) {
-      if (puertaAbierta) puertaGaraje.write(posicionAbierta);
-      else puertaGaraje.write(posicionCerrada);
+    if (!enMovimientoGaraje) {
+      if (puertaGarajeAbierta) puertaGaraje.write(posicionAbiertaGaraje);
+      else puertaGaraje.write(posicionCerradaGaraje);
     }
+    
+    if (!enMovimientoPrincipal) {
+      if (puertaPrincipalAbierta) puertaPrincipal.write(posicionAbiertaPrincipal);
+      else puertaPrincipal.write(posicionCerradaPrincipal);
+    }
+    
     ultimo = millis();
   }
 }
@@ -471,7 +540,8 @@ void mantenerPosicionPuerta() {
 // =====================================================================
 
 void enviarEstadoSensores() {
-  // Formato: SENSORS:gas,temp,pir,puerta
+  // ← MODIFICADO: Formato ahora incluye 2 puertas
+  // SENSORS:gas,temp,pir,puertaPrincipal,puertaCochera
   Serial.print("SENSORS:");
   Serial.print(nivelGas);
   Serial.print(",");
@@ -479,7 +549,9 @@ void enviarEstadoSensores() {
   Serial.print(",");
   Serial.print(movimientoDetectado ? "1" : "0");
   Serial.print(",");
-  Serial.println(puertaAbierta ? "1" : "0");
+  Serial.print(puertaPrincipalAbierta ? "1" : "0");  // ← Puerta principal
+  Serial.print(",");
+  Serial.println(puertaGarajeAbierta ? "1" : "0");   // ← Puerta cochera
 }
 
 void enviarEstadoCompleto() {

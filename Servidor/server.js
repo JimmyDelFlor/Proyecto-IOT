@@ -41,7 +41,8 @@ let systemState = {
     gas: { level: 0, status: 'normal', lastUpdate: null },
     temperature: { value: 0, status: 'normal', lastUpdate: null },
     motion: { detected: false, lastDetection: null, securityMode: false },
-    door: { open: false, lastChange: null }
+    doorMain: { open: false, lastChange: null },      // ← NUEVO
+    doorGarage: { open: false, lastChange: null }     // ← NUEVO
   },
   alerts: [],
   lastUpdate: null,
@@ -54,7 +55,6 @@ let systemState = {
     uptime: Date.now()
   }
 };
-
 // =====================================================
 // WEBSOCKET RAW PARA ESP32
 // =====================================================
@@ -130,20 +130,24 @@ wss.on('connection', (ws, req) => {
 function processArduinoMessage(message, deviceId = 'default') {
   console.log(`📨 [${deviceId}] ${message}`);
   
-  // Broadcast a clientes web
   io.emit('arduino-message', { message, deviceId, timestamp: new Date().toISOString() });
   
-  // Procesar OK: (confirmaciones de luces)
+  // Procesar OK: (confirmaciones)
   if (message.startsWith('OK:')) {
     const parts = message.split(':');
     if (parts.length >= 3) {
       const zone = parts[1];
       const state = parts[2] === 'ON';
       
-      if (zone === 'PUERTA') {
-        systemState.sensors.door.open = state;
-        systemState.sensors.door.lastChange = new Date().toISOString();
-        io.emit('door-update', systemState.sensors.door);
+      // ← NUEVO: Detectar puertas
+      if (zone === 'PUERTA_PRINCIPAL' || zone === 'DOOR_MAIN') {
+        systemState.sensors.doorMain.open = state;
+        systemState.sensors.doorMain.lastChange = new Date().toISOString();
+        io.emit('door-update', { doorType: 'main', ...systemState.sensors.doorMain });
+      } else if (zone === 'PUERTA_COCHERA' || zone === 'DOOR_GARAGE') {
+        systemState.sensors.doorGarage.open = state;
+        systemState.sensors.doorGarage.lastChange = new Date().toISOString();
+        io.emit('door-update', { doorType: 'garage', ...systemState.sensors.doorGarage });
       } else {
         updateLightState(zone, state, 'arduino');
       }
@@ -169,9 +173,9 @@ if (message === 'OK:TODAS_APAGADAS') {
 }
   
   // Procesar SENSORS: (datos de sensores)
-  if (message.startsWith('SENSORS:')) {
+   if (message.startsWith('SENSORS:')) {
     const data = message.substring(8).split(',');
-    if (data.length >= 4) {
+    if (data.length >= 5) { // ← Ahora son 5 valores
       const gasLevel = parseInt(data[0]) || 0;
       systemState.sensors.gas.level = gasLevel;
       systemState.sensors.gas.status = 
@@ -204,7 +208,9 @@ if (message === 'OK:TODAS_APAGADAS') {
       }
       systemState.sensors.motion.detected = motionDetected;
       
-      systemState.sensors.door.open = data[3] === '1';
+      // ← NUEVO: Dos puertas
+      systemState.sensors.doorMain.open = data[3] === '1';
+      systemState.sensors.doorGarage.open = data[4] === '1';
       
       io.emit('sensors-update', systemState.sensors);
     }
@@ -395,25 +401,36 @@ app.post('/api/command', (req, res) => {
 });
 
 app.post('/api/door', (req, res) => {
-  const { action, deviceId = 'ESP32_GATEWAY_01' } = req.body;
+  const { action, doorType = 'main', deviceId = 'ESP32_GATEWAY_01' } = req.body;
   
   if (action !== 'open' && action !== 'close') {
     return res.status(400).json({ error: 'Acción inválida' });
   }
   
-  const command = action === 'open' ? 'A' : 'C';
-  console.log(`🚪 Puerta: ${action}`);
+  // Comandos para diferentes puertas
+  let command;
+  if (doorType === 'main') {
+    command = action === 'open' ? 'A' : 'C';  // Puerta principal
+  } else if (doorType === 'garage') {
+    command = action === 'open' ? 'G' : 'H';  // Puerta cochera (G=open, H=close)
+  } else {
+    return res.status(400).json({ error: 'Tipo de puerta inválido' });
+  }
+  
+  console.log(`🚪 Puerta ${doorType}: ${action} (comando: ${command})`);
   
   const sent = sendCommandToDevice(deviceId, command);
   
   addToHistory({
     type: 'door_command',
-    action, deviceId,
+    action,
+    doorType,
+    deviceId,
     timestamp: new Date().toISOString(),
     source: 'api'
   });
   
-  res.json({ success: true, action, command, sent });
+  res.json({ success: true, action, doorType, command, sent });
 });
 
 app.post('/api/security-mode', (req, res) => {

@@ -1,22 +1,22 @@
 // =====================================================
-// OLLAMA INTEGRATION MODULE - FIXED VERSION
+// OLLAMA INTEGRATION MODULE - CON 2 PUERTAS
 // =====================================================
 
-// Usar fetch nativo en Node 18+ o require para versiones anteriores
 let fetch;
 try {
-  // Node 18+ tiene fetch nativo
   fetch = globalThis.fetch;
 } catch (e) {
-  // Node < 18 necesita node-fetch
   fetch = require('node-fetch');
 }
 
 // Configuración Ollama
 const OLLAMA_URL = process.env.OLLAMA_URL || 'https://unwainscotted-nonconsequentially-willene.ngrok-free.dev';
-const MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
+const MODEL = process.env.OLLAMA_MODEL || 'llama3.1:8b';
 
-// Contexto del sistema para Ollama
+// =====================================================
+// CONTEXTO ACTUALIZADO CON 2 PUERTAS
+// =====================================================
+
 const SYSTEM_CONTEXT = `Eres un asistente virtual de una casa inteligente IoT. Tu trabajo es interpretar comandos en lenguaje natural y convertirlos en acciones específicas.
 
 COMANDOS DISPONIBLES:
@@ -30,19 +30,22 @@ COMANDOS DISPONIBLES:
   * Pasadizo: ON=13, OFF=14
   * Lavandería: ON=15, OFF=16
 - Todas las luces: ON=17, OFF=18
-- Puerta: ABRIR=A, CERRAR=C
+- Puertas:
+  * Puerta Principal: ABRIR=A, CERRAR=C
+  * Puerta Cochera: ABRIR=G, CERRAR=H
 
 SENSORES DISPONIBLES:
 - gas: nivel de gas (MQ-6)
 - temperature: temperatura en °C
 - motion: detección de movimiento (PIR)
-- door: estado de puerta (abierta/cerrada)
+- doorMain: estado puerta principal (abierta/cerrada)
+- doorGarage: estado puerta cochera (abierta/cerrada)
 
 REGLAS CRÍTICAS:
 1. Responde SOLO con un JSON válido, sin texto adicional
 2. Si el usuario pide encender/apagar luces, devuelve: {"action": "command", "command": NÚMERO}
 3. Si pide información de sensores, devuelve: {"action": "query", "sensor": "NOMBRE_SENSOR"}
-4. Si pide abrir/cerrar puerta, devuelve: {"action": "door", "command": "A" o "C"}
+4. Si pide abrir/cerrar puerta, devuelve: {"action": "door", "command": "LETRA", "doorType": "main" o "garage"}
 5. Si es conversación general, devuelve: {"action": "chat", "response": "tu respuesta"}
 6. NUNCA incluyas explicaciones fuera del JSON
 
@@ -56,8 +59,14 @@ Respuesta: {"action": "command", "command": 18}
 Usuario: "¿cuál es la temperatura?"
 Respuesta: {"action": "query", "sensor": "temperature"}
 
-Usuario: "abre la puerta"
-Respuesta: {"action": "door", "command": "A"}
+Usuario: "abre la puerta principal"
+Respuesta: {"action": "door", "command": "A", "doorType": "main"}
+
+Usuario: "cierra la puerta de la cochera"
+Respuesta: {"action": "door", "command": "H", "doorType": "garage"}
+
+Usuario: "abre la cochera"
+Respuesta: {"action": "door", "command": "G", "doorType": "garage"}
 
 Usuario: "hola"
 Respuesta: {"action": "chat", "response": "¡Hola! ¿Qué necesitas?"}`;
@@ -68,34 +77,35 @@ Respuesta: {"action": "chat", "response": "¡Hola! ¿Qué necesitas?"}`;
 
 async function processWithOllama(userMessage, systemState) {
   try {
-    // Agregar contexto del estado actual
+    // ← ACTUALIZADO: Contexto con 2 puertas
     const contextMessage = `Estado actual del sistema:
 - Luces encendidas: ${Object.entries(systemState.lights).filter(([k,v]) => v).map(([k]) => k).join(', ') || 'ninguna'}
 - Temperatura: ${systemState.sensors.temperature.value}°C
 - Gas: nivel ${systemState.sensors.gas.level} (${systemState.sensors.gas.status})
 - Movimiento: ${systemState.sensors.motion.detected ? 'SÍ' : 'NO'}
-- Puerta: ${systemState.sensors.door.open ? 'ABIERTA' : 'CERRADA'}
+- Puerta Principal: ${systemState.sensors.doorMain?.open ? 'ABIERTA' : 'CERRADA'}
+- Puerta Cochera: ${systemState.sensors.doorGarage?.open ? 'ABIERTA' : 'CERRADA'}
 
 Usuario: ${userMessage}`;
 
-   const response = await fetch(`${OLLAMA_URL}/api/generate`, {
-  method: 'POST',
-  headers: { 
-    'Content-Type': 'application/json',
-    'ngrok-skip-browser-warning': 'true',  // ← AGREGAR ESTO
-    'User-Agent': 'SmartHome/1.0'          // ← Y ESTO
-  },
-  body: JSON.stringify({
-    model: MODEL,
-    prompt: contextMessage,
-    system: SYSTEM_CONTEXT,
-    stream: false,
-    temperature: 0.2,
-    options: {
-      num_predict: 100
-    }
-  })
-});
+    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true',
+        'User-Agent': 'SmartHome/1.0'
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        prompt: contextMessage,
+        system: SYSTEM_CONTEXT,
+        stream: false,
+        temperature: 0.2,
+        options: {
+          num_predict: 100
+        }
+      })
+    });
 
     if (!response.ok) {
       throw new Error(`Ollama HTTP ${response.status}`);
@@ -106,10 +116,8 @@ Usuario: ${userMessage}`;
 
     console.log('🤖 Ollama raw:', rawResponse);
 
-    // Intentar parsear JSON
     let parsedResponse;
     try {
-      // Buscar JSON en la respuesta
       const jsonMatch = rawResponse.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         parsedResponse = JSON.parse(jsonMatch[0]);
@@ -118,8 +126,6 @@ Usuario: ${userMessage}`;
       }
     } catch (e) {
       console.warn('⚠️ Ollama no devolvió JSON válido');
-      
-      // Fallback: interpretar manualmente
       parsedResponse = fallbackParser(userMessage, rawResponse);
     }
 
@@ -127,18 +133,18 @@ Usuario: ${userMessage}`;
 
   } catch (error) {
     console.error('❌ Error Ollama:', error.message);
-    
-    // Fallback si Ollama falla
     return fallbackParser(userMessage, '');
   }
 }
 
 // =====================================================
-// PARSER DE FALLBACK (sin Ollama)
+// PARSER DE FALLBACK - ACTUALIZADO CON 2 PUERTAS
 // =====================================================
 
 function fallbackParser(message, aiResponse) {
-  const msg = message.toLowerCase();
+  const msg = message.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  
+  console.log(`🔍 Fallback parser: "${msg}"`);
   
   // Detectar encender/prender/activar
   if (msg.match(/encien|prend|activ/)) {
@@ -148,9 +154,9 @@ function fallbackParser(message, aiResponse) {
     if (msg.includes('cochera') || msg.includes('garage')) return { action: 'command', command: 5 };
     if (msg.includes('cocina')) return { action: 'command', command: 7 };
     if (msg.includes('cuarto') || msg.includes('dormitorio')) return { action: 'command', command: 9 };
-    if (msg.includes('baño') || msg.includes('banio')) return { action: 'command', command: 11 };
+    if (msg.includes('bano') || msg.includes('banio')) return { action: 'command', command: 11 };
     if (msg.includes('pasadizo') || msg.includes('pasillo')) return { action: 'command', command: 13 };
-    if (msg.includes('lavanderia') || msg.includes('lavandería')) return { action: 'command', command: 15 };
+    if (msg.includes('lavanderia')) return { action: 'command', command: 15 };
   }
   
   // Detectar apagar/desactivar
@@ -161,21 +167,58 @@ function fallbackParser(message, aiResponse) {
     if (msg.includes('cochera') || msg.includes('garage')) return { action: 'command', command: 6 };
     if (msg.includes('cocina')) return { action: 'command', command: 8 };
     if (msg.includes('cuarto') || msg.includes('dormitorio')) return { action: 'command', command: 10 };
-    if (msg.includes('baño') || msg.includes('banio')) return { action: 'command', command: 12 };
+    if (msg.includes('bano') || msg.includes('banio')) return { action: 'command', command: 12 };
     if (msg.includes('pasadizo') || msg.includes('pasillo')) return { action: 'command', command: 14 };
-    if (msg.includes('lavanderia') || msg.includes('lavandería')) return { action: 'command', command: 16 };
+    if (msg.includes('lavanderia')) return { action: 'command', command: 16 };
   }
   
-  // Detectar puerta
-  if (msg.includes('abre') || msg.includes('abrir')) {
-    if (msg.includes('puerta')) return { action: 'door', command: 'A' };
-  }
-  if (msg.includes('cierra') || msg.includes('cerrar')) {
-    if (msg.includes('puerta')) return { action: 'door', command: 'C' };
+  // =====================================================
+  // NUEVO: DETECTAR PUERTAS (2 PUERTAS)
+  // =====================================================
+  
+  // Abrir puertas
+  if (msg.match(/abr/)) {
+    // Puerta Principal
+    if (msg.match(/principal|entrada|casa|frente/)) {
+      console.log('✓ Detectado: Abrir puerta principal');
+      return { action: 'door', command: 'A', doorType: 'main' };
+    }
+    // Puerta Cochera
+    if (msg.match(/cochera|garage|garaje|coche|auto/)) {
+      console.log('✓ Detectado: Abrir puerta cochera');
+      return { action: 'door', command: 'G', doorType: 'garage' };
+    }
+    // Si solo dice "abre la puerta", asumir principal
+    if (msg.match(/puerta/)) {
+      console.log('✓ Detectado: Abrir puerta (asumiendo principal)');
+      return { action: 'door', command: 'A', doorType: 'main' };
+    }
   }
   
-  // Detectar consultas de sensores
-  if (msg.match(/temperatura|cuántos grados|qué temperatura/)) {
+  // Cerrar puertas
+  if (msg.match(/cerr/)) {
+    // Puerta Principal
+    if (msg.match(/principal|entrada|casa|frente/)) {
+      console.log('✓ Detectado: Cerrar puerta principal');
+      return { action: 'door', command: 'C', doorType: 'main' };
+    }
+    // Puerta Cochera
+    if (msg.match(/cochera|garage|garaje|coche|auto/)) {
+      console.log('✓ Detectado: Cerrar puerta cochera');
+      return { action: 'door', command: 'H', doorType: 'garage' };
+    }
+    // Si solo dice "cierra la puerta", asumir principal
+    if (msg.match(/puerta/)) {
+      console.log('✓ Detectado: Cerrar puerta (asumiendo principal)');
+      return { action: 'door', command: 'C', doorType: 'main' };
+    }
+  }
+  
+  // =====================================================
+  // DETECTAR CONSULTAS DE SENSORES
+  // =====================================================
+  
+  if (msg.match(/temperatura|grados|calor|frio/)) {
     return { action: 'query', sensor: 'temperature' };
   }
   if (msg.match(/gas|fuga|huele/)) {
@@ -184,14 +227,23 @@ function fallbackParser(message, aiResponse) {
   if (msg.match(/movimiento|alguien|persona/)) {
     return { action: 'query', sensor: 'motion' };
   }
-  if (msg.match(/puerta.*abierta|puerta.*cerrada|estado.*puerta/)) {
-    return { action: 'query', sensor: 'door' };
+  
+  // Consultas de puertas
+  if (msg.match(/puerta.*(principal|entrada).*abierta|principal.*abierta/)) {
+    return { action: 'query', sensor: 'doorMain' };
+  }
+  if (msg.match(/puerta.*(cochera|garage).*abierta|cochera.*abierta/)) {
+    return { action: 'query', sensor: 'doorGarage' };
+  }
+  if (msg.match(/puerta.*abierta|estado.*puerta/)) {
+    return { action: 'query', sensor: 'doorMain' }; // Por defecto principal
   }
   
   // Si no se detecta nada, chat
+  console.log('✓ Ninguna acción detectada, modo chat');
   return {
     action: 'chat',
-    response: aiResponse || 'No entendí tu solicitud. Intenta: "enciende las luces de la sala" o "¿cuál es la temperatura?"'
+    response: aiResponse || 'No entendí tu solicitud. Intenta: "enciende las luces de la sala", "abre la puerta principal" o "¿cuál es la temperatura?"'
   };
 }
 
@@ -204,14 +256,15 @@ async function checkOllamaStatus() {
     const response = await fetch(`${OLLAMA_URL}/api/tags`, {
       method: 'GET',
       headers: {
-        'ngrok-skip-browser-warning': 'true',  // ← AGREGAR
-        'User-Agent': 'SmartHome/1.0'          // ← AGREGAR
+        'ngrok-skip-browser-warning': 'true',
+        'User-Agent': 'SmartHome/1.0'
       },
-      signal: AbortSignal.timeout(5000) // Aumentar timeout
+      signal: AbortSignal.timeout(5000)
     });
     
     if (response.ok) {
       const data = await response.json();
+      console.log('✅ Ollama disponible. Modelos:', data.models.map(m => m.name).join(', '));
       return {
         available: true,
         models: data.models.map(m => m.name),
@@ -226,7 +279,7 @@ async function checkOllamaStatus() {
 }
 
 // =====================================================
-// FUNCIÓN: Generar respuesta en lenguaje natural
+// GENERAR RESPUESTA - ACTUALIZADO CON 2 PUERTAS
 // =====================================================
 
 function generateNaturalResponse(action, systemState) {
@@ -251,15 +304,19 @@ function generateNaturalResponse(action, systemState) {
       17: '💡 Encendiendo todas las luces',
       18: '🌙 Apagando todas las luces'
     },
+    // ← ACTUALIZADO: Respuestas para 2 puertas
     door: {
-      A: '🚪 Abriendo puerta...',
-      C: '🚪 Cerrando puerta...'
+      A: '🏠 Abriendo puerta principal...',
+      C: '🏠 Cerrando puerta principal...',
+      G: '🚗 Abriendo puerta cochera...',
+      H: '🚗 Cerrando puerta cochera...'
     },
     query: {
       temperature: `🌡️ La temperatura actual es ${systemState.sensors.temperature.value.toFixed(1)}°C`,
       gas: `💨 Nivel de gas: ${systemState.sensors.gas.level} (${systemState.sensors.gas.status})`,
       motion: `👁️ Movimiento: ${systemState.sensors.motion.detected ? 'Detectado' : 'No detectado'}`,
-      door: `🚪 Puerta: ${systemState.sensors.door.open ? 'Abierta' : 'Cerrada'}`
+      doorMain: `🏠 Puerta Principal: ${systemState.sensors.doorMain?.open ? 'Abierta' : 'Cerrada'}`,
+      doorGarage: `🚗 Puerta Cochera: ${systemState.sensors.doorGarage?.open ? 'Abierta' : 'Cerrada'}`
     }
   };
 

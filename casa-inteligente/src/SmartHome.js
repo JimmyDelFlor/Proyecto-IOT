@@ -14,11 +14,12 @@ export default function App() {
   });
   const [pendingLights, setPendingLights] = useState({}); // Nuevos estados pendientes
   const [sensors, setSensors] = useState({
-    gas: { level: 0, status: 'normal' },
-    temperature: { value: 0, status: 'normal' },
-    motion: { detected: false, securityMode: false },
-    door: { open: false }
-  });
+  gas: { level: 0, status: 'normal' },
+  temperature: { value: 0, status: 'normal' },
+  motion: { detected: false, securityMode: false },
+  doorGarage: { open: false },      // ← NUEVO: Puerta cochera
+  doorMain: { open: false }          // ← NUEVO: Puerta principal
+});
   const [alerts, setAlerts] = useState([]);
   const [messages, setMessages] = useState([]);
   const [autoMode, setAutoMode] = useState(false);
@@ -425,16 +426,34 @@ export default function App() {
             </div>
 
             <div className="door-control">
-              <h3><DoorClosed size={20} /> Control de Puerta</h3>
-              <div className={`door-status ${sensors.door.open ? 'open' : 'closed'}`}>
-                {sensors.door.open ? <DoorOpen size={48} /> : <DoorClosed size={48} />}
-                <strong>{sensors.door.open ? 'ABIERTA' : 'CERRADA'}</strong>
+                <h3><DoorClosed size={20} /> Control de Puertas</h3>
+                
+                {/* Puerta Principal */}
+                <div className="door-section">
+                  <h4>🏠 Puerta Principal</h4>
+                  <div className={`door-status ${sensors.doorMain?.open ? 'open' : 'closed'}`}>
+                    {sensors.doorMain?.open ? <DoorOpen size={40} /> : <DoorClosed size={40} />}
+                    <strong>{sensors.doorMain?.open ? 'ABIERTA' : 'CERRADA'}</strong>
+                  </div>
+                  <div className="door-buttons">
+                    <button onClick={() => controlDoor('open', 'main')} className="btn-door open">Abrir</button>
+                    <button onClick={() => controlDoor('close', 'main')} className="btn-door close">Cerrar</button>
+                  </div>
+                </div>
+                
+                {/* Puerta Cochera */}
+                <div className="door-section">
+                  <h4>🚗 Puerta Cochera</h4>
+                  <div className={`door-status ${sensors.doorGarage?.open ? 'open' : 'closed'}`}>
+                    {sensors.doorGarage?.open ? <DoorOpen size={40} /> : <DoorClosed size={40} />}
+                    <strong>{sensors.doorGarage?.open ? 'ABIERTA' : 'CERRADA'}</strong>
+                  </div>
+                  <div className="door-buttons">
+                    <button onClick={() => controlDoor('open', 'garage')} className="btn-door open">Abrir</button>
+                    <button onClick={() => controlDoor('close', 'garage')} className="btn-door close">Cerrar</button>
+                  </div>
+                </div>
               </div>
-              <div className="door-buttons">
-                <button onClick={() => controlDoor('open')} className="btn-door open">Abrir</button>
-                <button onClick={() => controlDoor('close')} className="btn-door close">Cerrar</button>
-              </div>
-            </div>
           </div>
 
           {alerts.length > 0 && (
@@ -763,7 +782,25 @@ export default function App() {
           border-radius: 50%;
           animation: pulse-pending 1s infinite;
         }
-        
+        .door-section {
+        margin-bottom: 1.5rem;
+        padding: 1rem;
+        background: rgba(15, 23, 42, 0.3);
+        border-radius: 12px;
+      }
+
+      .door-section h4 {
+        font-size: 0.9rem;
+        margin-bottom: 1rem;
+        color: #94a3b8;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .door-section:last-child {
+        margin-bottom: 0;
+      }
         @keyframes pulse-pending {
           0%, 100% { opacity: 1; transform: scale(1); }
           50% { opacity: 0.5; transform: scale(1.2); }
