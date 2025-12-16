@@ -55,6 +55,8 @@ let systemState = {
     uptime: Date.now()
   }
 };
+
+let pendingTranscripts = [];
 // =====================================================
 // WEBSOCKET RAW PARA ESP32
 // =====================================================
@@ -863,6 +865,185 @@ app.post('/api/voice/stt', async (req, res) => {
     error: 'STT no implementado aún',
     message: 'Por ahora, envía el texto transcrito directamente'
   });
+});
+// =====================================================
+// ENDPOINT: Transcripción desde Drive/Colab → Chat directo
+// =====================================================
+
+app.post('/api/voice/transcript-drive', async (req, res) => {
+  const { deviceId, transcript, source } = req.body;
+  
+  if (!transcript) {
+    return res.status(400).json({ error: 'Transcript requerido' });
+  }
+  
+  console.log(`\n📝 Transcripción desde ${source || 'Drive'}`);
+  console.log(`   Device: ${deviceId}`);
+  console.log(`   Texto: "${transcript}"`);
+  
+  try {
+    // NO procesar con Ollama aquí, solo reenviar a clientes web
+    // El React recibirá esto y lo procesará con su propio flujo
+    
+    // Emitir a TODOS los clientes web conectados
+    io.emit('voice-transcript-received', {
+      deviceId: deviceId || 'ESP32_GATEWAY_01',
+      transcript,
+      timestamp: new Date().toISOString(),
+      source: source || 'google_drive'
+    });
+    
+    console.log('✅ Transcripción reenviada a clientes web');
+    
+    // Registrar en historial (opcional)
+    addToHistory({
+      type: 'voice_transcript',
+      deviceId,
+      transcript,
+      timestamp: new Date().toISOString(),
+      source: source || 'google_drive'
+    });
+    
+    res.json({
+      success: true,
+      transcript,
+      message: 'Transcripción enviada a clientes web'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error procesando transcripción:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// =====================================================
+// ENDPOINT: Recibir transcripción y encolarla
+// =====================================================
+
+app.post('/api/voice/transcript-drive', async (req, res) => {
+  const { deviceId, transcript, source } = req.body;
+  
+  if (!transcript) {
+    return res.status(400).json({ error: 'Transcript requerido' });
+  }
+  
+  console.log(`\n📝 Transcripción desde ${source || 'Drive'}`);
+  console.log(`   Device: ${deviceId}`);
+  console.log(`   Texto: "${transcript}"`);
+  
+  try {
+    // Agregar a cola de pendientes
+    const transcriptData = {
+      deviceId: deviceId || 'ESP32_GATEWAY_01',
+      transcript,
+      timestamp: new Date().toISOString(),
+      source: source || 'google_drive',
+      id: Date.now().toString()
+    };
+    
+    pendingTranscripts.push(transcriptData);
+    
+    // Limitar tamaño de cola
+    if (pendingTranscripts.length > 20) {
+      pendingTranscripts.shift();
+    }
+    
+    console.log(`✅ Transcripción encolada (${pendingTranscripts.length} pendientes)`);
+    
+    // También emitir por Socket.IO si hay clientes conectados
+    io.emit('voice-transcript-received', transcriptData);
+    
+    // Registrar en historial
+    addToHistory({
+      type: 'voice_transcript',
+      deviceId: transcriptData.deviceId,
+      transcript,
+      timestamp: transcriptData.timestamp,
+      source: transcriptData.source
+    });
+    
+    res.json({
+      success: true,
+      transcript,
+      message: 'Transcripción encolada'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error procesando transcripción:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// =====================================================
+// ENDPOINT: Obtener transcripciones pendientes (polling)
+// =====================================================
+
+app.get('/api/voice/pending-transcripts', (req, res) => {
+  // Devolver todas las transcripciones pendientes
+  const transcripts = [...pendingTranscripts];
+  
+  // Limpiar cola después de enviar
+  pendingTranscripts = [];
+  
+  res.json({
+    transcripts,
+    count: transcripts.length
+  });
+});
+
+// =====================================================
+// ENDPOINT: Recibir transcripción del ESP32 directo
+// =====================================================
+
+app.post('/api/voice/transcript', async (req, res) => {
+  const { deviceId, transcript, timestamp } = req.body;
+  
+  if (!transcript) {
+    return res.status(400).json({ error: 'Transcript requerido' });
+  }
+  
+  console.log(`🎤 [${deviceId}] Transcripción: "${transcript}"`);
+  
+  try {
+    // Encolar igual que Drive
+    const transcriptData = {
+      deviceId: deviceId || 'ESP32_GATEWAY_01',
+      transcript,
+      timestamp: new Date().toISOString(),
+      source: 'esp32_direct',
+      id: Date.now().toString()
+    };
+    
+    pendingTranscripts.push(transcriptData);
+    
+    if (pendingTranscripts.length > 20) {
+      pendingTranscripts.shift();
+    }
+    
+    console.log(`✅ Transcripción encolada`);
+    
+    // Emitir por Socket.IO
+    io.emit('voice-transcript-received', transcriptData);
+    
+    res.json({
+      success: true,
+      transcript,
+      message: 'Transcripción encolada'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error procesando voz:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 // =====================================================
 // ENDPOINT: Transcripción desde Drive/Colab

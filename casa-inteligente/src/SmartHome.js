@@ -31,6 +31,7 @@ export default function App() {
   const [customServerUrl, setCustomServerUrl] = useState(SERVER_URL);
   const socketRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  const [socketConnection, setSocketConnection] = useState(null);
 
   // Cargar URL guardada
   useEffect(() => {
@@ -90,79 +91,121 @@ export default function App() {
     }
   };
 
-  const startPolling = () => {
-    setConnected(true);
-    showToast('Conectado al servidor', 'success');
-    
-    let pollCount = 0;
-    
-    // Polling rápido: cada 500ms para luces, cada 2s para el resto
-    const pollInterval = setInterval(async () => {
-      pollCount++;
-      
-      try {
-        // SIEMPRE actualizar luces y sensores (más importante)
-        const statusRes = await fetch(`${customServerUrl}/api/status`);
-        
-        if (!statusRes.ok) throw new Error('Servidor no responde');
-        
-        const statusData = await statusRes.json();
-        
-        // Actualizar luces y limpiar estados pendientes que ya se confirmaron
-        setLights(prevLights => {
-          const newLights = statusData.lights;
-          setPendingLights(prevPending => {
-            const stillPending = {};
-            Object.keys(prevPending).forEach(key => {
-              // Si el estado real no coincide con el estado esperado, mantener como pendiente
-              if (newLights[key] !== prevPending[key]) {
-                stillPending[key] = prevPending[key];
-              }
-            });
-            return stillPending;
-          });
-          return newLights;
-        });
-        
-        setSensors(statusData.sensors);
-        setAutoMode(statusData.autoMode);
-        setStatistics(statusData.statistics);
-        
-        // Cada 4 ciclos (2 segundos), actualizar sugerencias/patrones/alertas
-        if (pollCount % 4 === 0) {
-          const [suggestionsRes, patternsRes, alertsRes] = await Promise.all([
-            fetch(`${customServerUrl}/api/ai/suggestions`),
-            fetch(`${customServerUrl}/api/ai/patterns`),
-            fetch(`${customServerUrl}/api/alerts`)
-          ]);
-          
-          const suggestionsData = await suggestionsRes.json();
-          const patternsData = await patternsRes.json();
-          const alertsData = await alertsRes.json();
-          
-          setSuggestions(suggestionsData.suggestions);
-          setPatterns(patternsData.patterns);
-          setAlerts(alertsData.alerts);
-        }
-        
-        if (!connected) {
-          setConnected(true);
-          setConnectionError(null);
-        }
-      } catch (error) {
-        setConnected(false);
-        setConnectionError(error.message);
-        clearInterval(pollInterval);
-        
-        reconnectTimeoutRef.current = setTimeout(() => {
-          startPolling();
-        }, 5000);
+  // Modificar la función startPolling para crear un socket simulado
+const startPolling = () => {
+  setConnected(true);
+  showToast('Conectado al servidor', 'success');
+  
+  let pollCount = 0;
+  
+  // Crear un objeto "socket" simulado para eventos
+  const simulatedSocket = {
+    listeners: {},
+    on: function(event, callback) {
+      if (!this.listeners[event]) {
+        this.listeners[event] = [];
       }
-    }, 500); // ← Ahora cada 500ms en lugar de 2000ms
-
-    return () => clearInterval(pollInterval);
+      this.listeners[event].push(callback);
+    },
+    off: function(event, callback) {
+      if (this.listeners[event]) {
+        this.listeners[event] = this.listeners[event].filter(cb => cb !== callback);
+      }
+    },
+    emit: function(event, data) {
+      if (this.listeners[event]) {
+        this.listeners[event].forEach(cb => cb(data));
+      }
+    }
   };
-
+  
+  setSocketConnection(simulatedSocket);
+  
+  // Polling principal
+  const pollInterval = setInterval(async () => {
+    pollCount++;
+    
+    try {
+      const statusRes = await fetch(`${customServerUrl}/api/status`);
+      
+      if (!statusRes.ok) throw new Error('Servidor no responde');
+      
+      const statusData = await statusRes.json();
+      
+      // Actualizar estados...
+      setLights(prevLights => {
+        const newLights = statusData.lights;
+        setPendingLights(prevPending => {
+          const stillPending = {};
+          Object.keys(prevPending).forEach(key => {
+            if (newLights[key] !== prevPending[key]) {
+              stillPending[key] = prevPending[key];
+            }
+          });
+          return stillPending;
+        });
+        return newLights;
+      });
+      
+      setSensors(statusData.sensors);
+      setAutoMode(statusData.autoMode);
+      setStatistics(statusData.statistics);
+      
+      if (pollCount % 4 === 0) {
+        const [suggestionsRes, patternsRes, alertsRes] = await Promise.all([
+          fetch(`${customServerUrl}/api/ai/suggestions`),
+          fetch(`${customServerUrl}/api/ai/patterns`),
+          fetch(`${customServerUrl}/api/alerts`)
+        ]);
+        
+        const suggestionsData = await suggestionsRes.json();
+        const patternsData = await patternsRes.json();
+        const alertsData = await alertsRes.json();
+        
+        setSuggestions(suggestionsData.suggestions);
+        setPatterns(patternsData.patterns);
+        setAlerts(alertsData.alerts);
+      }
+      
+      if (!connected) {
+        setConnected(true);
+        setConnectionError(null);
+      }
+    } catch (error) {
+      setConnected(false);
+      setConnectionError(error.message);
+      clearInterval(pollInterval);
+      
+      reconnectTimeoutRef.current = setTimeout(() => {
+        startPolling();
+      }, 5000);
+    }
+  }, 500);
+  
+  // NUEVO: Polling específico para transcripciones
+  const transcriptPollInterval = setInterval(async () => {
+    try {
+      // Endpoint especial que devuelve transcripciones pendientes
+      const res = await fetch(`${customServerUrl}/api/voice/pending-transcripts`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.transcripts && data.transcripts.length > 0) {
+          data.transcripts.forEach(transcript => {
+            // Emitir al socket simulado
+            simulatedSocket.emit('voice-transcript-received', transcript);
+          });
+        }
+      }
+    } catch (error) {
+      // Ignorar errores silenciosamente
+    }
+  }, 1000); // Check cada segundo
+  
+  return () => {
+    clearInterval(pollInterval);
+    clearInterval(transcriptPollInterval);
+  };
+};
   const sendCommand = async (command) => {
     try {
       const response = await fetch(`${customServerUrl}/api/command`, {

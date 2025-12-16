@@ -1,9 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, MicOff, Send, MessageSquare, Bot, User, Loader } from 'lucide-react';
-
-// =====================================================
-// COMPONENTE: ASISTENTE VIRTUAL CON VOZ
-// =====================================================
+import { Mic, MicOff, Send, MessageSquare, Bot, User, Loader, Volume2 } from 'lucide-react';
 
 export default function VoiceAssistant({ serverUrl, socket }) {
   const [messages, setMessages] = useState([
@@ -15,18 +11,47 @@ export default function VoiceAssistant({ serverUrl, socket }) {
   const [ollamaStatus, setOllamaStatus] = useState(null);
   const [showAssistant, setShowAssistant] = useState(false);
   const [micPermission, setMicPermission] = useState('prompt');
-  const [esp32Listening, setEsp32Listening] = useState(false); // Estado de escucha del ESP32
+  const [esp32Listening, setEsp32Listening] = useState(false);
+  const [incomingTranscript, setIncomingTranscript] = useState(null); // Nueva transcripción
   
   const recognitionRef = useRef(null);
   const messagesEndRef = useRef(null);
   const recognitionTimeoutRef = useRef(null);
 
   // =====================================================
-  // INICIALIZACIÓN - Web Speech API
+  // ESCUCHAR TRANSCRIPCIONES DEL SERVIDOR
   // =====================================================
   
   useEffect(() => {
-    // Verificar soporte de Speech Recognition
+    if (!socket) return;
+    
+    // Escuchar transcripciones desde Drive/Colab/ESP32
+    socket.on('voice-transcript-received', (data) => {
+      console.log('📝 Transcripción recibida:', data);
+      
+      // Mostrar notificación visual
+      setIncomingTranscript(data.transcript);
+      
+      // Agregar al chat como mensaje del usuario
+      addMessage('user', `🎤 ${data.transcript}`);
+      
+      // Enviar automáticamente a Ollama después de 500ms
+      setTimeout(() => {
+        handleSendMessage(data.transcript);
+        setIncomingTranscript(null);
+      }, 500);
+    });
+    
+    return () => {
+      socket.off('voice-transcript-received');
+    };
+  }, [socket]);
+
+  // =====================================================
+  // INICIALIZACIÓN - Web Speech API (micrófono web)
+  // =====================================================
+  
+  useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     
     if (SpeechRecognition) {
@@ -43,7 +68,7 @@ export default function VoiceAssistant({ serverUrl, socket }) {
         recognitionTimeoutRef.current = setTimeout(() => {
           if (recognitionRef.current && isListening) {
             recognitionRef.current.stop();
-            addMessage('assistant', '⏱️ Tiempo agotado. No detecté ningún audio. Intenta de nuevo.');
+            addMessage('assistant', '⏱️ Tiempo agotado. No detecté ningún audio.');
           }
         }, 10000);
       };
@@ -54,8 +79,7 @@ export default function VoiceAssistant({ serverUrl, socket }) {
         }
         
         const transcript = event.results[0][0].transcript;
-        const confidence = event.results[0][0].confidence;
-        console.log('🎤 Reconocido:', transcript, '(confianza:', confidence, ')');
+        console.log('🎤 Reconocido:', transcript);
         setInput(transcript);
         setIsListening(false);
         
@@ -71,23 +95,17 @@ export default function VoiceAssistant({ serverUrl, socket }) {
         }
         
         if (event.error === 'no-speech') {
-          addMessage('assistant', '🎤 No detecté tu voz. Asegúrate de hablar cerca del micrófono e intenta de nuevo.');
-        } else if (event.error === 'not-allowed' || event.error === 'permission-denied') {
+          addMessage('assistant', '🎤 No detecté tu voz. Intenta de nuevo.');
+        } else if (event.error === 'not-allowed') {
           setMicPermission('denied');
-          addMessage('assistant', '❌ Necesito permiso para usar el micrófono. Por favor, actívalo en tu navegador.');
-        } else if (event.error === 'aborted') {
-          // No mostrar mensaje
-        } else if (event.error === 'audio-capture') {
-          addMessage('assistant', '❌ No puedo acceder al micrófono. Verifica que esté conectado y funcionando.');
-        } else {
-          addMessage('assistant', `❌ Error: ${event.error}. Intenta de nuevo.`);
+          addMessage('assistant', '❌ Necesito permiso para usar el micrófono.');
+        } else if (event.error !== 'aborted') {
+          addMessage('assistant', `❌ Error: ${event.error}`);
         }
       };
       
       recognitionRef.current.onend = () => {
-        console.log('🎤 Reconocimiento finalizado');
         setIsListening(false);
-        
         if (recognitionTimeoutRef.current) {
           clearTimeout(recognitionTimeoutRef.current);
         }
@@ -98,46 +116,15 @@ export default function VoiceAssistant({ serverUrl, socket }) {
     checkOllamaStatus();
     const interval = setInterval(checkOllamaStatus, 30000);
     
-    // Escuchar eventos de voz del ESP32 vía socket
-    if (socket) {
-      socket.on('wake-word-detected', (data) => {
-        console.log('🎤 Wake word detectado en ESP32:', data);
-        setEsp32Listening(true);
-        addMessage('assistant', '🎤 ESP32 activado. Escuchando...');
-      });
-      
-      socket.on('voice-transcript', (data) => {
-        console.log('📝 Transcripción del ESP32:', data);
-        if (data.transcript) {
-          addMessage('user', `🎤 ${data.transcript}`);
-          setEsp32Listening(false);
-        }
-      });
-      
-      socket.on('voice-processed', (data) => {
-        console.log('✅ Comando de voz procesado:', data);
-        if (data.response) {
-          addMessage('assistant', data.response);
-        }
-        setEsp32Listening(false);
-      });
-    }
-    
     return () => {
       clearInterval(interval);
       if (recognitionTimeoutRef.current) {
         clearTimeout(recognitionTimeoutRef.current);
       }
-      
-      if (socket) {
-        socket.off('wake-word-detected');
-        socket.off('voice-transcript');
-        socket.off('voice-processed');
-      }
     };
-  }, [socket]);
+  }, []);
 
-  // Scroll automático al final
+  // Scroll automático
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -168,36 +155,29 @@ export default function VoiceAssistant({ serverUrl, socket }) {
       addMessage('assistant', '⏸️ Reconocimiento detenido.');
     } else {
       try {
-        // Verificar permisos de micrófono primero
         if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
           navigator.mediaDevices.getUserMedia({ audio: true })
             .then(() => {
-              // Permiso concedido, iniciar reconocimiento
               recognitionRef.current.start();
-              addMessage('assistant', '🎤 Escuchando... Habla ahora (tienes ~5 segundos).');
+              addMessage('assistant', '🎤 Escuchando... Habla ahora.');
             })
-            .catch((error) => {
-              console.error('Error de permisos:', error);
-              addMessage('assistant', '❌ No puedo acceder al micrófono. Verifica los permisos en tu navegador.');
+            .catch(() => {
+              addMessage('assistant', '❌ No puedo acceder al micrófono.');
               setIsListening(false);
             });
         } else {
-          // Fallback para navegadores sin getUserMedia
           recognitionRef.current.start();
-          addMessage('assistant', '🎤 Escuchando... Habla ahora (tienes ~5 segundos).');
+          addMessage('assistant', '🎤 Escuchando... Habla ahora.');
         }
       } catch (error) {
-        console.error('Error al iniciar:', error);
-        
         if (error.name === 'InvalidStateError') {
-          // Ya está corriendo, detenerlo primero
           recognitionRef.current.stop();
           setTimeout(() => {
             recognitionRef.current.start();
-            addMessage('assistant', '🎤 Escuchando... Habla ahora (tienes ~5 segundos).');
+            addMessage('assistant', '🎤 Escuchando... Habla ahora.');
           }, 100);
         } else {
-          addMessage('assistant', '❌ Error al iniciar el micrófono. Intenta de nuevo.');
+          addMessage('assistant', '❌ Error al iniciar el micrófono.');
           setIsListening(false);
         }
       }
@@ -205,7 +185,11 @@ export default function VoiceAssistant({ serverUrl, socket }) {
   };
 
   const addMessage = (role, content) => {
-    setMessages(prev => [...prev, { role, content, timestamp: new Date().toLocaleTimeString() }]);
+    setMessages(prev => [...prev, { 
+      role, 
+      content, 
+      timestamp: new Date().toLocaleTimeString() 
+    }]);
   };
 
   const handleSendMessage = async (messageText = null) => {
@@ -213,8 +197,11 @@ export default function VoiceAssistant({ serverUrl, socket }) {
     
     if (!text) return;
     
-    // Agregar mensaje del usuario
-    addMessage('user', text);
+    // Si no es una transcripción automática, agregar mensaje del usuario
+    if (!messageText) {
+      addMessage('user', text);
+    }
+    
     setInput('');
     setIsProcessing(true);
 
@@ -235,7 +222,7 @@ export default function VoiceAssistant({ serverUrl, socket }) {
       addMessage('assistant', data.response || 'Comando ejecutado');
       
       // Síntesis de voz (opcional)
-      if ('speechSynthesis' in window) {
+      if ('speechSynthesis' in window && data.response) {
         const utterance = new SpeechSynthesisUtterance(data.response);
         utterance.lang = 'es-ES';
         utterance.rate = 1.1;
@@ -244,7 +231,7 @@ export default function VoiceAssistant({ serverUrl, socket }) {
 
     } catch (error) {
       console.error('Error:', error);
-      addMessage('assistant', '❌ Error al procesar. Verifica que Ollama esté ejecutándose.');
+      addMessage('assistant', '❌ Error al procesar. Verifica que el servidor esté activo.');
     } finally {
       setIsProcessing(false);
     }
@@ -257,12 +244,11 @@ export default function VoiceAssistant({ serverUrl, socket }) {
     }
   };
 
-  // Ejemplos rápidos
   const quickExamples = [
     '💡 Enciende las luces de la sala',
     '🌙 Apaga todo',
     '🌡️ ¿Cuál es la temperatura?',
-    '🚪 Abre la puerta'
+    '🚪 Abre la puerta principal'
   ];
 
   // =====================================================
@@ -271,6 +257,14 @@ export default function VoiceAssistant({ serverUrl, socket }) {
 
   return (
     <>
+      {/* Notificación de transcripción entrante */}
+      {incomingTranscript && (
+        <div className="transcript-notification">
+          <Volume2 size={20} className="pulse-icon" />
+          <span>Procesando: "{incomingTranscript}"</span>
+        </div>
+      )}
+
       {/* Botón flotante */}
       <button 
         onClick={() => setShowAssistant(!showAssistant)}
@@ -292,11 +286,6 @@ export default function VoiceAssistant({ serverUrl, socket }) {
                 <span className={`status ${ollamaStatus?.available ? 'online' : 'offline'}`}>
                   {ollamaStatus?.available ? '🟢 Ollama Online' : '🔴 Ollama Offline'}
                 </span>
-                {esp32Listening && (
-                  <span className="esp32-status">
-                    🎤 ESP32 escuchando...
-                  </span>
-                )}
               </div>
             </div>
             <button onClick={() => setShowAssistant(false)} className="close-btn">✕</button>
@@ -355,13 +344,7 @@ export default function VoiceAssistant({ serverUrl, socket }) {
                 <div className="pulse-ring"></div>
                 <div className="pulse-ring delay-1"></div>
                 <div className="pulse-ring delay-2"></div>
-                <span>Escuchando...</span>
-              </div>
-            )}
-            
-            {micPermission === 'denied' && (
-              <div className="mic-warning">
-                ⚠️ Micrófono bloqueado. <a href="#" onClick={(e) => { e.preventDefault(); window.open('chrome://settings/content/microphone'); }}>Activar permisos</a>
+                <span>Escuchando desde navegador...</span>
               </div>
             )}
             
@@ -370,7 +353,7 @@ export default function VoiceAssistant({ serverUrl, socket }) {
                 onClick={toggleListening}
                 className={`mic-btn ${isListening ? 'listening' : ''}`}
                 disabled={isProcessing}
-                title={isListening ? 'Detener' : 'Hablar'}
+                title={isListening ? 'Detener' : 'Hablar (navegador)'}
               >
                 {isListening ? <MicOff size={20} /> : <Mic size={20} />}
               </button>
@@ -380,7 +363,7 @@ export default function VoiceAssistant({ serverUrl, socket }) {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder={isListening ? '🎤 Escuchando...' : 'Escribe o usa el micrófono...'}
+                placeholder={isListening ? '🎤 Escuchando...' : 'Escribe, usa micrófono o di "JARVIS"...'}
                 disabled={isProcessing || isListening}
               />
               
@@ -398,6 +381,40 @@ export default function VoiceAssistant({ serverUrl, socket }) {
       )}
 
       <style>{`
+        .transcript-notification {
+          position: fixed;
+          top: 2rem;
+          left: 50%;
+          transform: translateX(-50%);
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+          padding: 1rem 2rem;
+          background: linear-gradient(135deg, rgba(139, 92, 246, 0.95), rgba(124, 58, 237, 0.95));
+          border: 1px solid rgba(139, 92, 246, 0.5);
+          border-radius: 16px;
+          backdrop-filter: blur(20px);
+          color: white;
+          font-weight: 600;
+          box-shadow: 0 12px 48px rgba(139, 92, 246, 0.6);
+          z-index: 10000;
+          animation: slideDown 0.3s ease-out;
+        }
+        
+        @keyframes slideDown {
+          from { transform: translateX(-50%) translateY(-100%); opacity: 0; }
+          to { transform: translateX(-50%) translateY(0); opacity: 1; }
+        }
+        
+        .pulse-icon {
+          animation: pulse-scale 1s infinite;
+        }
+        
+        @keyframes pulse-scale {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.2); }
+        }
+        
         .assistant-fab {
           position: fixed;
           bottom: 2rem;
@@ -486,15 +503,6 @@ export default function VoiceAssistant({ serverUrl, socket }) {
         .header-info .status {
           font-size: 0.75rem;
           color: #94a3b8;
-        }
-        
-        .esp32-status {
-          display: block;
-          margin-top: 0.25rem;
-          font-size: 0.75rem;
-          color: #ef4444;
-          font-weight: 600;
-          animation: pulse 1.5s infinite;
         }
         
         .close-btn {
@@ -679,22 +687,6 @@ export default function VoiceAssistant({ serverUrl, socket }) {
           }
         }
         
-        .mic-warning {
-          padding: 0.75rem;
-          background: rgba(245, 158, 11, 0.1);
-          border: 1px solid rgba(245, 158, 11, 0.3);
-          border-radius: 12px;
-          color: #f59e0b;
-          font-size: 0.85rem;
-          text-align: center;
-        }
-        
-        .mic-warning a {
-          color: #fbbf24;
-          text-decoration: underline;
-          margin-left: 0.5rem;
-        }
-        
         .assistant-input > div:last-of-type {
           display: flex;
           gap: 0.75rem;
@@ -776,6 +768,13 @@ export default function VoiceAssistant({ serverUrl, socket }) {
           .assistant-fab {
             bottom: 1rem;
             right: 1rem;
+          }
+          
+          .transcript-notification {
+            left: 1rem;
+            right: 1rem;
+            transform: none;
+            width: auto;
           }
         }
       `}</style>
