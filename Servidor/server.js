@@ -864,7 +864,97 @@ app.post('/api/voice/stt', async (req, res) => {
     message: 'Por ahora, envía el texto transcrito directamente'
   });
 });
+// =====================================================
+// ENDPOINT: Transcripción desde Drive/Colab
+// =====================================================
 
+app.post('/api/voice/transcript-drive', async (req, res) => {
+  const { deviceId, transcript, source } = req.body;
+  
+  if (!transcript) {
+    return res.status(400).json({ error: 'Transcript requerido' });
+  }
+  
+  console.log(`\n📝 Transcripción desde ${source || 'Drive'}`);
+  console.log(`   Device: ${deviceId}`);
+  console.log(`   Texto: "${transcript}"`);
+  
+  try {
+    // Procesar con Ollama
+    if (!ollama) {
+      return res.json({
+        success: true,
+        transcript,
+        message: 'Transcripción recibida pero Ollama no disponible'
+      });
+    }
+    
+    const action = await ollama.processWithOllama(transcript, systemState);
+    console.log(`🎯 Acción: ${action.action}`);
+    
+    // Ejecutar comando
+    let executed = false;
+    
+    if (action.action === 'command' && action.command !== undefined) {
+      executed = sendCommandToDevice(deviceId, action.command);
+      systemState.statistics.totalCommands++;
+    } else if (action.action === 'door' && action.command) {
+      executed = sendCommandToDevice(deviceId, action.command);
+    }
+    
+    // Generar respuesta
+    const response = ollama.generateNaturalResponse(action, systemState);
+    
+    // Registrar en historial
+    addToHistory({
+      type: 'voice_drive_command',
+      deviceId,
+      transcript,
+      action: action.action,
+      command: action.command,
+      response,
+      timestamp: new Date().toISOString(),
+      source: source || 'google_drive'
+    });
+    
+    // Emitir a clientes web
+    io.emit('voice-drive-processed', {
+      deviceId,
+      transcript,
+      action: action.action,
+      response,
+      executed,
+      timestamp: new Date().toISOString()
+    });
+    
+    // Enviar respuesta al ESP32 (si está conectado por WebSocket)
+    const ws = rawWsClients[deviceId];
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        type: 'drive_stt_response',
+        transcript,
+        response,
+        action: action.action,
+        executed
+      }));
+    }
+    
+    res.json({
+      success: true,
+      transcript,
+      action: action.action,
+      response,
+      executed
+    });
+    
+  } catch (error) {
+    console.error('❌ Error procesando transcripción:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 // =====================================================
 // EVENTOS SOCKET.IO - VOZ
 // =====================================================
